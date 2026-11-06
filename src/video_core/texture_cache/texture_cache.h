@@ -11,6 +11,11 @@
 #include <cstdlib>
 #include <limits>
 #include <map>
+#include <mutex>
+#include <set>
+#include <string>
+#include <string_view>
+#include <tuple>
 #include <vector>
 #include <optional>
 #include <bit>
@@ -28,6 +33,7 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/texture_cache/conversion.h"
+#include "video_core/texture_cache/formatter.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/texture_cache_base.h"
 #include "video_core/oot_dlss.h"
@@ -44,6 +50,33 @@ namespace VideoCommon {
 [[nodiscard]] inline bool NativeDrawDiagnostics() {
     static const bool enabled = std::getenv("EDEN_NATIVE_DRAW_DIAGNOSTICS") != nullptr;
     return enabled;
+}
+
+/// EDEN_NX2_RESCALE_TRACE=1: log once per image and reason why an image stays at 1x, and each
+/// image that a written storage binding scales down (with resolution scaling on).
+inline bool RescaleTraceEnabled() {
+    static const bool enabled = std::getenv("EDEN_NX2_RESCALE_TRACE") != nullptr;
+    return enabled;
+}
+
+inline void TraceRescale(const ImageBase& image, std::string_view reason,
+                         const ImageBase* other = nullptr) {
+    static std::mutex mutex;
+    static std::set<std::tuple<GPUVAddr, u32, u32, std::string>> seen;
+    std::scoped_lock lock{mutex};
+    if (seen.size() > 4096 ||
+        !seen.emplace(image.gpu_addr, image.info.size.width, static_cast<u32>(image.info.format),
+                      std::string(reason))
+             .second) {
+        return;
+    }
+    const std::string with =
+        other != nullptr ? fmt::format(" {:#x} {} {}x{}", other->gpu_addr, other->info.format,
+                                       other->info.size.width, other->info.size.height)
+                         : std::string{};
+    LOG_INFO(HW_GPU, "Rescale: {:#x} {} {}x{} levels {} layers {}: {}{}", image.gpu_addr,
+             image.info.format, image.info.size.width, image.info.size.height,
+             image.info.resources.levels, image.info.resources.layers, reason, with);
 }
 
 using Tegra::Texture::TICEntry;
@@ -519,6 +552,10 @@ void TextureCache<P>::FillImageViews(std::span<ImageViewInOut> views, bool compu
                         continue;
                     }
                     auto& image = slot_images[image_view.image_id];
+                    if (RescaleTraceEnabled() && True(image.flags & ImageFlagBits::Rescaled)) {
+                        TraceRescale(image, compute ? "written by compute"
+                                                    : "written storage image");
+                    }
                     has_blacklisted |= ScaleDown(image);
                     image.scale_rating = 0;
                 }
@@ -756,6 +793,27 @@ bool TextureCache<P>::RescaleRenderTargets() {
             }
         } else {
             rescaled = false;
+            if (RescaleTraceEnabled()) {
+                const auto blocker = [&](ImageId id) -> ImageBase* {
+                    return id != CORRUPT_ID && !ImageCanRescale(slot_images[id]) ? &slot_images[id]
+                                                                                  : nullptr;
+                };
+                ImageBase* blocked = blocker(tmp_depth_image);
+                for (size_t index = 0; index < NUM_RT && blocked == nullptr; ++index) {
+                    blocked = blocker(tmp_color_images[index]);
+                }
+                for (const ImageId id : tmp_color_images) {
+                    if (id != CORRUPT_ID && blocked != nullptr && &slot_images[id] != blocked &&
+                        True(slot_images[id].flags & ImageFlagBits::Rescaled)) {
+                        TraceRescale(slot_images[id], "render target bound with", blocked);
+                    }
+                }
+                if (tmp_depth_image != CORRUPT_ID && blocked != nullptr &&
+                    &slot_images[tmp_depth_image] != blocked &&
+                    True(slot_images[tmp_depth_image].flags & ImageFlagBits::Rescaled)) {
+                    TraceRescale(slot_images[tmp_depth_image], "depth bound with", blocked);
+                }
+            }
             const auto scale_down = [this](ImageId image_id) {
                 if (image_id != CORRUPT_ID) {
                     Image& image = slot_images[image_id];
@@ -2333,6 +2391,9 @@ ImageId TextureCache<P>::FindImage(const ImageInfo& info, GPUVAddr gpu_addr,
 template <class P>
 bool TextureCache<P>::ImageCanRescale(ImageBase& image) {
     if (!image.info.rescaleable) {
+        if (RescaleTraceEnabled()) {
+            TraceRescale(image, "not rescaleable");
+        }
         return false;
     }
     if (OotDlss::OutputOnlyRescale() && !OotDlss::IsOutputImage(image.gpu_addr, image.info.format,
@@ -2355,6 +2416,9 @@ bool TextureCache<P>::ImageCanRescale(ImageBase& image) {
                                   (std::max)(image.info.resources.layers, 1);
         if (Vulkan::ShouldLeaveImageUnbacked(scaled_texels, GetScaledImageSizeBytes(image),
                                              runtime.GetDeviceLocalMemory())) {
+            if (RescaleTraceEnabled()) {
+                TraceRescale(image, "scaled copy would be unbacked");
+            }
             return false;
         }
     }
@@ -2368,6 +2432,9 @@ bool TextureCache<P>::ImageCanRescale(ImageBase& image) {
     for (const auto& alias : image.aliased_images) {
         Image& other_image = slot_images[alias.id];
         if (!ImageCanRescale(other_image)) {
+            if (RescaleTraceEnabled()) {
+                TraceRescale(image, "alias stays 1x", &other_image);
+            }
             image.flags &= ~ImageFlagBits::CheckingRescalable;
             return false;
         }

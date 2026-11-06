@@ -81,6 +81,7 @@ Use these before guessing. All are off unless the variable is set; pass them as 
 | Video playback | `EDEN_NX2_VDEC_TRACE=1`, `EDEN_NX2_VDEC_DUMP=<dir>` | Decoder submit, decode and composite trace; decoded frames. |
 | Performance and frame pacing | `EDEN_NX2_GPU_PROFILE=1`, `EDEN_DKB_FRAME_TRACE=1` | GPU thread time per second by zone; per-present interval, CPU and fence timing. |
 | Command corruption or pop-in | `EDEN_NX2_PB_CHECK=1`; A/B with `EDEN_NX2_PB_SNAPSHOT=0` or `EDEN_NX2_FETCH_DRAIN=1` | How many pushbuffer entries change between submit and parse. |
+| Resolution scaling: images or passes left at 1x (mixed-scale image, zoomed or washed-out scene) | `EDEN_NX2_RESCALE_TRACE=1` | Once per image and reason, why it stays at 1x (`not rescaleable`, `scaled copy would be unbacked`, `alias stays 1x` with the alias), which scaled targets a 1x render target or depth pulls back down (`render target bound with ...`), and which images a written storage binding scales down. Combine with the frame dump's `rescaled` field. |
 | Split GPU thread races | `EDEN_NX2_SPLIT_CHECK=1` | Reports scheduler use from the wrong thread. |
 | Upscaler and DLSS contracts | `EDEN_NX2_DLSS_CONTRACT_TRACE=1` | Inputs and outputs of replaced upscaler networks. |
 | Service calls | `EDEN_NX2_IPC_TRACE=1` | IPC command trace. |
