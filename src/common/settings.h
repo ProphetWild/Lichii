@@ -441,9 +441,8 @@ struct Values {
     // vectors in its place. EDEN_OOT_DLSS=1 / EDEN_OOT_NO_SHARPEN=1 override it.
     SwitchableSetting<OotAntiAliasing> oot_anti_aliasing{linkage, OotAntiAliasing::Game,
                                                          "oot_anti_aliasing", Category::Renderer};
-    // Ocarina of Time's DLSS output is 4K (the game's 2560x1440 at 1.5x), Quality from 2560x1440.
-    // Not shown in the UI: 4K DLAA (the 3D at 1.5x too) is shelved until the game renders
-    // correctly at 1.5x; EDEN_OOT_DLSS_OUTPUT=dlaa selects it for development.
+    // Ocarina of Time's DLSS output is 4K (the game's 2560x1440 at 1.5x): Quality from
+    // 2560x1440, or DLAA with the 3D at 3840x2160 too. EDEN_OOT_DLSS_OUTPUT overrides it.
     SwitchableSetting<OotDlssOutput> oot_dlss_output{linkage, OotDlssOutput::Quality4k,
                                                      "oot_dlss_output", Category::Renderer};
 

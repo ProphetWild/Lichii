@@ -233,7 +233,8 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             setting->Id() == Settings::values.nvidia_dlss_frame_generation.Id() ||
             setting->Id() == Settings::values.dlss_sharpening.Id() ||
             setting->Id() == Settings::values.dlss_preset.Id() ||
-            setting->Id() == Settings::values.dlss_frame_generation_multiplier.Id()) {
+            setting->Id() == Settings::values.dlss_frame_generation_multiplier.Id() ||
+            setting->Id() == Settings::values.oot_dlss_output.Id()) {
             continue;
         }
 #endif

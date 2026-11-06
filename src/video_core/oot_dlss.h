@@ -36,15 +36,19 @@ inline bool Requested() {
 }
 
 /// DLSS output: 4K, with the 3D at 4K (DLAA) or at the game's 2560x1440 (Quality: only the
-/// output side is rescaled, see OutputOnlyRescale).
+/// output side is rescaled, see OutputOnlyRescale). EDEN_OOT_DLSS_OUTPUT=dlaa|quality overrides
+/// the setting.
 inline Settings::OotDlssOutput Output() {
-    static const Settings::OotDlssOutput output = [] {
-        // 4K DLAA is development-only (shelved, see settings.h).
+    static const std::optional<Settings::OotDlssOutput> override_output =
+        []() -> std::optional<Settings::OotDlssOutput> {
         const char* value = std::getenv("EDEN_OOT_DLSS_OUTPUT");
-        return value != nullptr && value[0] == 'd' ? Settings::OotDlssOutput::Dlaa4k
-                                                   : Settings::OotDlssOutput::Quality4k;
+        if (value == nullptr || value[0] == '\0') {
+            return std::nullopt;
+        }
+        return value[0] == 'd' ? Settings::OotDlssOutput::Dlaa4k
+                               : Settings::OotDlssOutput::Quality4k;
     }();
-    return output;
+    return override_output.value_or(Settings::values.oot_dlss_output.GetValue());
 }
 
 /// Only the images after the 3D (DLSS's output, the HUD, the presented copy) are rescaled.

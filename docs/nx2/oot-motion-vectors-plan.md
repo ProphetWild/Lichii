@@ -301,9 +301,13 @@ Results so far (Kokiri Forest, 1x, RTX 5090):
   and searches up to 64 draws a frame for it.
 - **4K output.** `oot_dlss_output` (4K Quality from 1440p, default; 4K DLAA). Quality rescales
   only the output chain (`OotDlss::IsOutputImage`: the network output and the A2B10G10R10 present
-  copy) at 1.5x, so DLSS runs 2560x1440 -> 3840x2160 (mode 3). DLAA rescales everything and is
-  broken: the tonemapped image stays at 1x (DLSS reads a corner of the scaled scene) and the
-  game's fog/exposure wash out at 1.5x. OoT uses preset M (`EDEN_NX2_DLSS_PRESET` overrides).
+  copy) at 1.5x, so DLSS runs 2560x1440 -> 3840x2160 (mode 3). DLAA rescales everything and
+  DLSS runs 3840x2160 -> 3840x2160 (mode 6). It used to wash out white: the scene depth is a
+  33-layer D32 array (274M texels at 1.5x), which the 2^28-texel guard in `ImageCanRescale` kept
+  at 1x, and every colour target bound with it fell back to 1x pass by pass. The guard now
+  follows the allocator's backing rule (`ShouldLeaveImageUnbacked`, Lichii #267 `e15125b73`);
+  `EDEN_NX2_RESCALE_TRACE=1` logs why an image stays at 1x. OoT uses preset M
+  (`EDEN_NX2_DLSS_PRESET` overrides).
 - **Diagnostics:** `EDEN_OOT_MOTION_DEBUG=1` shows the motion vectors in place of the image (red:
   length / 32 px; green 0.6: object motion used; +0.3: empty depth). `EDEN_OOT_OBJECT_MOTION_STATS`
   adds mean |x| of object and camera motion and x direction agreement.

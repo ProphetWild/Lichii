@@ -210,6 +210,11 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "resolution).\nNVIDIA DLSS: NVIDIA DLSS in its place, with sub-pixel jitter and "
               "camera motion vectors (needs \"Use NVIDIA DLSS\" on).\nTakes effect when the game "
               "starts."));
+    INSERT(Settings, oot_dlss_output, tr("Ocarina of Time DLSS output:"),
+           tr("Ocarina of Time with NVIDIA DLSS only. Both output 4K.\n4K Quality: the 3D renders "
+              "at the game's 2560x1440 and DLSS upscales it.\n4K DLAA: the 3D renders at "
+              "3840x2160 and DLSS only anti-aliases it. Sharper, but slower.\nTakes effect when "
+              "the game starts."));
     INSERT(Settings, post_shader_chain, QString(), QString());
     INSERT(Settings, post_shader_preset, QString(), QString());
     INSERT(Settings, post_shader_enabled, tr("Enable post-processing effects"),
@@ -600,6 +605,11 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                               PAIR(OotAntiAliasing, Game, tr("Game")),
                               PAIR(OotAntiAliasing, NoSharpen, tr("No sharpening")),
                               PAIR(OotAntiAliasing, NvidiaDlss, tr("NVIDIA DLSS")),
+                          }});
+    translations->insert({Settings::EnumMetadata<Settings::OotDlssOutput>::Index(),
+                          {
+                              PAIR(OotDlssOutput, Quality4k, tr("4K Quality")),
+                              PAIR(OotDlssOutput, Dlaa4k, tr("4K DLAA")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::AspectRatio>::Index(),
                           {
