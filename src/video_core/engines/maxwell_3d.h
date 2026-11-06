@@ -3408,6 +3408,8 @@ private:
     /// FrontDmaRead without draining the back, when the words can be known: false otherwise.
     bool FrontDmaReadQueued(VideoCommon::GpuSplit& split, FrontState& state, u32 macro, u32 method,
                             GPUVAddr source, u32 words);
+    void FrontTrackInstanceLoop(FrontState& state, u32 method, u32 value);
+    bool FrontSkipsLoopWrite(FrontState& state, u32 method, u32 value, bool shadow_kept);
     void FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& state, u32 macro, u32 method,
                       u32 count);
     void FrontVerify(VideoCommon::GpuSplit& split, FrontState& state);
