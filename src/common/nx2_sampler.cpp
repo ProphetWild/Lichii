@@ -119,10 +119,10 @@ std::vector<Target> FindThreads(const std::vector<std::string>& patterns) {
     return targets;
 }
 
-// Walks a suspended thread's stack from its context. Nothing here may allocate: the thread
-// could be paused holding the heap lock.
-unsigned Walk(CONTEXT context, std::array<DWORD64, MaxDepth>& frames) {
-    unsigned depth = 0;
+// Walks a suspended thread's stack from its context, counting frames in `depth`. Nothing here
+// may allocate: the thread could be paused holding the heap lock.
+void WalkFrames(CONTEXT& context, DWORD64* frames, unsigned& depth) {
+    depth = 0;
     while (depth < MaxDepth && context.Rip != 0) {
         frames[depth++] = context.Rip;
         DWORD64 image_base{};
@@ -141,6 +141,17 @@ unsigned Walk(CONTEXT context, std::array<DWORD64, MaxDepth>& frames) {
         DWORD64 establisher_frame{};
         RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, context.Rip, function, &context,
                          &handler_data, &establisher_frame, nullptr);
+    }
+}
+
+// Unwinding through JIT code or a fiber switch can leave a stack pointer that isn't one: the
+// read faults on this thread and, unhandled, ends the process. Such a walk keeps the frames it
+// found.
+unsigned Walk(CONTEXT context, std::array<DWORD64, MaxDepth>& frames) {
+    unsigned depth = 0;
+    __try {
+        WalkFrames(context, frames.data(), depth);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
     return depth;
 }
