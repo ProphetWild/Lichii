@@ -287,7 +287,20 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     };
     u8* pointer = impl->device_memory.template GetPointer<u8>(cpu_addr);
     u8* pointer_timestamp = impl->device_memory.template GetPointer<u8>(cpu_addr + 8);
-    std::function<void()> operation([this, streamer, query_base = query, query_location,
+    // EDEN_NX2_REPORT_FENCES=1: a fence-flagged report stays registered until its fence runs, and
+    // that fence is never skipped as empty, at any accuracy (removes Ocarina of Time's white
+    // flashes at low accuracy, but costs it about 15% frame rate). Otherwise, at low accuracy with
+    // Default fences, the report counts as synchronized and is freed at once.
+    static const bool report_fences = [] {
+        const char* value = std::getenv("EDEN_NX2_REPORT_FENCES");
+        return value != nullptr && value[0] == '1';
+    }();
+    const bool is_synced = !report_fences && is_fence &&
+                           (Settings::IsGPUFenceBehaviorDefault()
+                                ? !Settings::IsGPULevelHigh()
+                                : !Settings::IsGPUFenceBehaviorBalanced() &&
+                                      !Settings::IsGPUFenceBehaviorAccurate());
+    std::function<void()> operation([this, is_synced, streamer, query_base = query, query_location,
                                      pointer, pointer_timestamp, cpu_addr, addr,
                                      asid = gpu_memory->GetID(), counter_type, front_counted] {
         // The report is finished whichever way this operation leaves (after the guest write).
@@ -315,7 +328,9 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
                          trace, asid, addr, cpu_addr, static_cast<u32>(counter_type),
                          static_cast<u32>(query_base->flags));
             }
-            impl->pending_unregister.push_back(query_location);
+            if (!is_synced) [[likely]] {
+                impl->pending_unregister.push_back(query_location);
+            }
             return;
         }
         if (False(query_base->flags & QueryFlagBits::IsFinalValueSynced)) [[unlikely]] {
@@ -328,7 +343,9 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
             }
             LOG_ERROR(HW_GPU,
                       "Query report value not synchronized. Consider increasing GPU accuracy.");
-            impl->pending_unregister.push_back(query_location);
+            if (!is_synced) [[likely]] {
+                impl->pending_unregister.push_back(query_location);
+            }
             return;
         }
         query_base->value += streamer->GetAmendValue();
@@ -351,12 +368,14 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
                      wide ? query_base->value : static_cast<u32>(query_base->value),
                      static_cast<u32>(query_base->flags));
         }
-        impl->pending_unregister.push_back(query_location);
+        if (!is_synced) [[likely]] {
+            impl->pending_unregister.push_back(query_location);
+        }
     });
     if (is_fence) {
         Tegra::g_nx2_async_reports_issued[Tegra::Nx2AsyncReportSlot(cpu_addr)].fetch_add(
             1, std::memory_order_release);
-        VideoCore::g_signaling_query_report_fence = true;
+        VideoCore::g_signaling_query_report_fence = report_fences;
         impl->rasterizer.SignalFence(std::move(operation));
         VideoCore::g_signaling_query_report_fence = false;
     } else {
@@ -387,6 +406,10 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         Tegra::g_nx2_async_reports_issued[Tegra::Nx2AsyncReportSlot(cpu_addr)].fetch_add(
             1, std::memory_order_release);
         impl->rasterizer.SyncOperation(std::move(operation));
+    }
+    if (is_synced) {
+        streamer->Free(new_query_id);
+        return;
     }
     auto [cont_addr, base] = gen_caching_indexing(cpu_addr);
     {
