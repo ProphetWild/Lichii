@@ -20,6 +20,7 @@
 #include "video_core/renderer_vulkan/vk_fsr3_upscaler.h"
 #include "video_core/renderer_vulkan/vk_oot_motion_vectors.h"
 #ifdef EGLANTINE_STREAMLINE
+#include "video_core/renderer_vulkan/vk_oot_ui_alpha.h"
 #include "video_core/renderer_vulkan/vk_streamline_dlss.h"
 #endif
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
@@ -149,6 +150,14 @@ public:
                  std::array<u32, 2> render_size, std::array<f32, 2> jitter,
                  const std::array<f32, 16>& reproject, bool flip_y, bool reset);
 
+    /// After OotDlss drew DLSS's output into `image`: keeps a copy without the HUD for frame
+    /// generation's UI alpha (see OotUiAlpha).
+    void OotUiSnapshot(VkImage image, VideoCore::Surface::PixelFormat format, VkExtent2D extent);
+
+    /// At the composition of Streamline frame `frame_index`: tags the HUD drawn over `image` since
+    /// its snapshot as frame generation's UI alpha.
+    void OotUiTag(VkImage image, u32 frame_index);
+
     /// True when TemporalUpscale would use the depth (FSR 3.1 not forced off and not failed).
     [[nodiscard]] bool WantsTemporalUpscaleDepth() const;
 
@@ -276,6 +285,7 @@ public:
     std::unique_ptr<StreamlineDlssUpscaler> dlss_upscaler;
     bool dlss_unsupported{};
     std::unique_ptr<OotMotionVectors> oot_motion_vectors;
+    std::unique_ptr<OotUiAlpha> oot_ui_alpha;
 #endif
 
     /// TemporalUpscale's history: its previous result (images[current]) and the image the next

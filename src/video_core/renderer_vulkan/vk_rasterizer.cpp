@@ -2198,6 +2198,11 @@ bool RasterizerVulkan::AccelerateOotDlss(const Tegra::Engines::Fermi2D::Surface&
     return texture_cache.OotDlss(dst, src, depth, jitter, reproject, flip_y, reset);
 }
 
+void RasterizerVulkan::OotTagUiAlpha(u32 frame_index) {
+    std::scoped_lock lock{texture_cache.mutex};
+    texture_cache.OotTagUiAlpha(frame_index);
+}
+
 Tegra::Engines::AccelerateDMAInterface& RasterizerVulkan::AccessAccelerateDMA() {
     return accelerate_dma;
 }

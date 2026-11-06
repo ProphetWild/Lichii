@@ -1,0 +1,38 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// UI alpha for DLSS Frame Generation in Ocarina of Time: 1 where the game's HUD changed the DLSS
+// output after it was drawn (the image as presented against a copy taken before the HUD), else 0.
+// The mask covers the presented frame; the output image fills `screen` within it.
+
+#version 460
+
+layout (local_size_x = 8, local_size_y = 8) in;
+
+layout (binding = 0) uniform sampler2D with_ui;
+layout (binding = 1) uniform sampler2D without_ui;
+layout (binding = 2, r16f) uniform writeonly image2D ui_alpha;
+
+layout (push_constant) uniform PushConstants {
+    ivec2 mask_size;
+    ivec2 screen_offset;
+    ivec2 screen_size;
+    ivec2 source_size;
+};
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, mask_size))) {
+        return;
+    }
+    const ivec2 local = pixel - screen_offset;
+    float alpha = 0.0;
+    if (all(greaterThanEqual(local, ivec2(0))) && all(lessThan(local, screen_size))) {
+        const ivec2 texel = min(local * source_size / screen_size, source_size - 1);
+        // Both are the same image's bits where nothing was drawn over it.
+        const vec4 now = texelFetch(with_ui, texel, 0);
+        const vec4 before = texelFetch(without_ui, texel, 0);
+        alpha = any(notEqual(now.rgb, before.rgb)) ? 1.0 : 0.0;
+    }
+    imageStore(ui_alpha, pixel, vec4(alpha));
+}

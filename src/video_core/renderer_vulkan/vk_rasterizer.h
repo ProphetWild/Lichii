@@ -165,6 +165,8 @@ public:
                            const Tegra::Texture::TICEntry& depth, std::array<f32, 2> jitter,
                            const std::array<f32, 16>& reproject, bool flip_y,
                            bool reset) override;
+    /// See TextureCache::OotTagUiAlpha.
+    void OotTagUiAlpha(u32 frame_index);
     Tegra::Engines::AccelerateDMAInterface& AccessAccelerateDMA() override;
     void AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
                                   std::span<const u8> memory) override;

@@ -545,6 +545,8 @@ if (ENABLE_NVIDIA_DLSS)
         set(STREAMLINE_INCLUDE_DIR "${streamline_SOURCE_DIR}/include")
     endif()
     target_sources(video_core PRIVATE
+        renderer_vulkan/vk_oot_ui_alpha.cpp
+        renderer_vulkan/vk_oot_ui_alpha.h
         renderer_vulkan/vk_streamline_dlss.cpp
         renderer_vulkan/vk_streamline_dlss.h
         vulkan_common/streamline.cpp

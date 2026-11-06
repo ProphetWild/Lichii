@@ -2123,6 +2123,30 @@ bool TextureCacheRuntime::OotDlss(Framebuffer* dst_framebuffer, ImageView& input
 #endif
 }
 
+void TextureCacheRuntime::OotUiSnapshot(VkImage image, VideoCore::Surface::PixelFormat format,
+                                        VkExtent2D extent) {
+#ifdef EGLANTINE_STREAMLINE
+    if (!OotUiAlpha::Wanted()) {
+        return;
+    }
+    if (!oot_ui_alpha) {
+        oot_ui_alpha = std::make_unique<OotUiAlpha>(device, memory_allocator);
+    }
+    oot_ui_alpha->Snapshot(scheduler, image,
+                           MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, format)
+                               .format,
+                           extent);
+#endif
+}
+
+void TextureCacheRuntime::OotUiTag(VkImage image, u32 frame_index) {
+#ifdef EGLANTINE_STREAMLINE
+    if (oot_ui_alpha) {
+        oot_ui_alpha->Tag(scheduler, image, frame_index);
+    }
+#endif
+}
+
 bool TextureCacheRuntime::TemporalUpscale(Framebuffer* dst_framebuffer, ImageView& dst,
                                           ImageView& input_color, ImageView& motion_vectors,
                                           ImageView* depth, std::array<u32, 2> render_size,

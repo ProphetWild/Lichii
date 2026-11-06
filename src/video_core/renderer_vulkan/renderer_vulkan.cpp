@@ -254,6 +254,9 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     Frame* frame = present_manager.GetRenderFrame();
 #ifdef EGLANTINE_STREAMLINE
     frame->dlss_frame = Streamline::TakeUpscaledFrame();
+    if (frame->dlss_frame) {
+        rasterizer.OotTagUiAlpha(*frame->dlss_frame);
+    }
 #endif
     const auto acquired = trace ? std::chrono::steady_clock::now()
                                 : std::chrono::steady_clock::time_point{};

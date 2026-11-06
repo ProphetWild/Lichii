@@ -311,6 +311,10 @@ public:
                  const Tegra::Texture::TICEntry& depth, std::array<f32, 2> jitter,
                  const std::array<f32, 16>& reproject, bool flip_y, bool reset);
 
+    /// Tags the HUD drawn over the last OotDlss output as frame generation's UI alpha for
+    /// Streamline frame `frame_index` (Vulkan with Streamline only).
+    void OotTagUiAlpha(u32 frame_index);
+
     /// Health check of a game's DLSS network output (dst) against its input (src); see the
     /// runtime's ProbeGameDlssOutput. Returns an earlier check's result when one is ready.
     std::optional<VideoCore::GameDlssProbe> ProbeGameDlssOutput(
@@ -567,6 +571,9 @@ private:
     [[nodiscard]] std::optional<DAddr> ImageCpuAddress(GPUVAddr gpu_addr, size_t size) const;
 
     bool has_deleted_images = false;
+    /// The last OotDlss output (and its address, in case the slot is reused), for OotTagUiAlpha.
+    ImageId oot_ui_image{};
+    GPUVAddr oot_ui_gpu_addr{};
     /// True while a clear binds its render targets (UpdateRenderTargets(true)), so JoinImages can
     /// skip the upload of a new target the clear overwrites whole.
     bool clearing_render_targets = false;

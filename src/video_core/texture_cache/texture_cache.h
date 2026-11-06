@@ -1453,9 +1453,30 @@ bool TextureCache<P>::OotDlss(const Tegra::Engines::Fermi2D::Surface& dst,
             return false;
         }
         Framebuffer* const dst_framebuffer = &slot_framebuffers[dst_view->first];
-        return runtime.OotDlss(dst_framebuffer, slot_image_views[src_view->second],
-                               slot_image_views[depth_view], render_size, jitter, reproject,
-                               flip_y, reset);
+        if (!runtime.OotDlss(dst_framebuffer, slot_image_views[src_view->second],
+                             slot_image_views[depth_view], render_size, jitter, reproject, flip_y,
+                             reset)) {
+            return false;
+        }
+        Image& dst_image = slot_images[dst_id];
+        oot_ui_image = dst_id;
+        oot_ui_gpu_addr = dst_image.gpu_addr;
+        runtime.OotUiSnapshot(dst_image.Handle(), dst_image.info.format,
+                              dst_framebuffer->RenderArea());
+        return true;
+    }
+}
+
+template <class P>
+void TextureCache<P>::OotTagUiAlpha(u32 frame_index) {
+    if constexpr (requires(Runtime& r, Image& i) { r.OotUiTag(i.Handle(), frame_index); }) {
+        if (!oot_ui_image || !slot_images.contains(oot_ui_image)) {
+            return;
+        }
+        Image& image = slot_images[oot_ui_image];
+        if (image.gpu_addr == oot_ui_gpu_addr) {
+            runtime.OotUiTag(image.Handle(), frame_index);
+        }
     }
 }
 
