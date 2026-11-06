@@ -10,11 +10,18 @@ $ErrorActionPreference = 'Continue'
 # Native Windows Python (MSYS python rejects C:/ paths); $env:OOT_PYTHON overrides it.
 $py = if ($env:OOT_PYTHON) { $env:OOT_PYTHON } else { (Get-Command python.exe -ErrorAction Stop).Source }
 $root = Split-Path -Parent $PSScriptRoot
-Stop-Process -Name lichii -Force -ErrorAction SilentlyContinue
-Start-Sleep 2
+# Only the instance this trial starts is closed: a running Lichii (the owner's game) is left
+# alone, and the trial doesn't start beside it (both would take the debug server's port).
+$before = @(Get-Process lichii -ErrorAction SilentlyContinue | ForEach-Object Id)
+if ($before.Count -ne 0) {
+    "[$Label] Lichii is already running (pid $($before -join ', ')); close it first"
+    exit 1
+}
 $env:EDEN_HDR_OUTPUT = '1'
 foreach ($k in $Env.Keys) { Set-Item -Path "env:$k" -Value $Env[$k] }
 cmd /c "$root\tuned\run-oot.cmd"
+Start-Sleep 3
+$mine = @(Get-Process lichii -ErrorAction SilentlyContinue)
 & $py -I "$root\tools\nx2\oot_autoload.py" --presses 3 --title-wait 20 | Out-Null
 $out = & $py -I "$root\tools\nx2\oot_frame_check.py" --duration $Watch --interval $Interval
 $result = ($out | Select-String 'RESULT').Line
@@ -24,4 +31,4 @@ $median = if ($fps) { ($fps | Sort-Object)[[int]($fps.Count / 2)] } else { 0 }
 $out | Select-String 'flat 0\.[6-9]|flat 1\.0' | ForEach-Object { "    $($_.Line)" }
 $shot = Join-Path $root ("build\debug\trial-" + ($Label -replace '[^A-Za-z0-9_-]', '_') + ".png")
 & $py -I "$root\tools\nx2\debug_mcp.py" --call '{"method":"screenshot","params":{}}' --out $shot | Out-Null
-Stop-Process -Name lichii -Force -ErrorAction SilentlyContinue
+$mine | Stop-Process -Force -ErrorAction SilentlyContinue
