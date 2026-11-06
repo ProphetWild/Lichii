@@ -36,6 +36,7 @@
 #include "video_core/nx2_profile.h"
 #include "video_core/render_trace.h"
 #include "video_core/textures/decoders.h"
+#include "video_core/vulkan_common/unbacked_image_policy.h"
 
 namespace VideoCommon {
 
@@ -2344,14 +2345,16 @@ bool TextureCache<P>::ImageCanRescale(ImageBase& image) {
         return false;
     }
     {
-        // A scaled copy past 2^28 texels is never backed (the Vulkan allocator gives it an
-        // unbacked sparse image that samples as zero): Ocarina of Time's 12288x12288 D16 sun
-        // shadow map at 1.5x lost all sunlight. Keep such images at 1x.
+        // Keep an image at 1x when the Vulkan allocator would leave its scaled copy unbacked
+        // (an unbacked image drops writes and samples as zero), by the allocator's own rule:
+        // past 2^28 texels and more than a quarter of the device-local memory. Ocarina of
+        // Time's 33-layer 2560x1440 scene depth (274M texels at 1.5x, 1.1 GiB) is backed.
         const auto& res = Settings::values.resolution_info;
         const u64 scaled_texels = u64{res.ScaleUp(image.info.size.width)} *
                                   res.ScaleUp(image.info.size.height) *
                                   (std::max)(image.info.resources.layers, 1);
-        if (scaled_texels > (u64{1} << 28)) {
+        if (Vulkan::ShouldLeaveImageUnbacked(scaled_texels, GetScaledImageSizeBytes(image),
+                                             runtime.GetDeviceLocalMemory())) {
             return false;
         }
     }
