@@ -299,7 +299,7 @@ Results so far (Kokiri Forest, 1x, RTX 5090):
   view-projections (`OotDlss::IsPerspective`) that are close, prefers a pair that differs
   (seen: c[7] +0xc0 current, +0x100 previous; c[3] +0xa0 / +0x270 holds the same matrix twice)
   and searches up to 64 draws a frame for it.
-- **4K output.** `oot_dlss_output` (4K Quality from 1440p, default; 4K DLAA). Quality rescales
+- **4K output.** `oot_anti_aliasing` NVIDIA DLSS (4K Quality from 1440p) or NVIDIA DLAA (4K). Quality rescales
   only the output chain (`OotDlss::IsOutputImage`: the network output and the A2B10G10R10 present
   copy) at 1.5x, so DLSS runs 2560x1440 -> 3840x2160 (mode 3). DLAA rescales everything and
   DLSS runs 3840x2160 -> 3840x2160 (mode 6). It used to wash out white: the scene depth is a

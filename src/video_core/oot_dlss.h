@@ -29,15 +29,16 @@ inline bool Requested() {
         if (const char* value = std::getenv("EDEN_OOT_DLSS")) {
             return value[0] == '1';
         }
-        return Settings::values.oot_anti_aliasing.GetValue() ==
-               Settings::OotAntiAliasing::NvidiaDlss;
+        const auto mode = Settings::values.oot_anti_aliasing.GetValue();
+        return mode == Settings::OotAntiAliasing::NvidiaDlss ||
+               mode == Settings::OotAntiAliasing::NvidiaDlaa;
     }();
     return requested;
 }
 
 /// DLSS output: 4K, with the 3D at 4K (DLAA) or at the game's 2560x1440 (Quality: only the
-/// output side is rescaled, see OutputOnlyRescale). EDEN_OOT_DLSS_OUTPUT=dlaa|quality overrides
-/// the setting.
+/// output side is rescaled, see OutputOnlyRescale), picked with the anti-aliasing setting.
+/// EDEN_OOT_DLSS_OUTPUT=dlaa|quality overrides it.
 inline Settings::OotDlssOutput Output() {
     static const std::optional<Settings::OotDlssOutput> override_output =
         []() -> std::optional<Settings::OotDlssOutput> {
@@ -48,7 +49,10 @@ inline Settings::OotDlssOutput Output() {
         return value[0] == 'd' ? Settings::OotDlssOutput::Dlaa4k
                                : Settings::OotDlssOutput::Quality4k;
     }();
-    return override_output.value_or(Settings::values.oot_dlss_output.GetValue());
+    return override_output.value_or(Settings::values.oot_anti_aliasing.GetValue() ==
+                                            Settings::OotAntiAliasing::NvidiaDlaa
+                                        ? Settings::OotDlssOutput::Dlaa4k
+                                        : Settings::OotDlssOutput::Quality4k);
 }
 
 /// Only the images after the 3D (DLSS's output, the HUD, the presented copy) are rescaled.

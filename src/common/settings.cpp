@@ -47,7 +47,6 @@ SETTING(u16, false);
 SWITCHABLE(AnisotropyMode, true);
 SWITCHABLE(AntiAliasing, false);
 SWITCHABLE(OotAntiAliasing, false);
-SWITCHABLE(OotDlssOutput, false);
 SWITCHABLE(DlssPreset, false);
 SWITCHABLE(DlssFrameGeneration, false);
 SWITCHABLE(AspectRatio, true);

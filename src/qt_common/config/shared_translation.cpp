@@ -207,14 +207,10 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, oot_anti_aliasing, tr("Ocarina of Time anti-aliasing:"),
            tr("Ocarina of Time only. Game: the game's own anti-aliasing network, which sharpens "
               "heavily.\nNo sharpening: the image as the game renders it (pairs well with a higher "
-              "resolution).\nNVIDIA DLSS: NVIDIA DLSS in its place, with sub-pixel jitter and "
-              "camera motion vectors (needs \"Use NVIDIA DLSS\" on).\nTakes effect when the game "
-              "starts."));
-    INSERT(Settings, oot_dlss_output, tr("Ocarina of Time DLSS output:"),
-           tr("Ocarina of Time with NVIDIA DLSS only. Both output 4K.\n4K Quality: the 3D renders "
-              "at the game's 2560x1440 and DLSS upscales it.\n4K DLAA: the 3D renders at "
-              "3840x2160 and DLSS only anti-aliases it. Sharper, but slower.\nTakes effect when "
-              "the game starts."));
+              "resolution).\nNVIDIA DLSS (4K Quality): NVIDIA DLSS in its place, upscaling the "
+              "game's 2560x1440 to 3840x2160 with sub-pixel jitter and motion vectors.\nNVIDIA "
+              "DLAA (4K): the 3D renders at 3840x2160 and DLSS only anti-aliases it. Sharper, but "
+              "slower.\nBoth need \"Use NVIDIA DLSS\" on. Takes effect when the game starts."));
     INSERT(Settings, post_shader_chain, QString(), QString());
     INSERT(Settings, post_shader_preset, QString(), QString());
     INSERT(Settings, post_shader_enabled, tr("Enable post-processing effects"),
@@ -604,12 +600,8 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                           {
                               PAIR(OotAntiAliasing, Game, tr("Game")),
                               PAIR(OotAntiAliasing, NoSharpen, tr("No sharpening")),
-                              PAIR(OotAntiAliasing, NvidiaDlss, tr("NVIDIA DLSS")),
-                          }});
-    translations->insert({Settings::EnumMetadata<Settings::OotDlssOutput>::Index(),
-                          {
-                              PAIR(OotDlssOutput, Quality4k, tr("4K Quality")),
-                              PAIR(OotDlssOutput, Dlaa4k, tr("4K DLAA")),
+                              PAIR(OotAntiAliasing, NvidiaDlss, tr("NVIDIA DLSS (4K Quality)")),
+                              PAIR(OotAntiAliasing, NvidiaDlaa, tr("NVIDIA DLAA (4K)")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::AspectRatio>::Index(),
                           {

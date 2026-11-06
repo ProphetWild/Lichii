@@ -65,7 +65,6 @@ SETTING(u16, false);
 SWITCHABLE(AnisotropyMode, true);
 SWITCHABLE(AntiAliasing, false);
 SWITCHABLE(OotAntiAliasing, false);
-SWITCHABLE(OotDlssOutput, false);
 SWITCHABLE(DlssPreset, false);
 SWITCHABLE(DlssFrameGeneration, false);
 SWITCHABLE(AspectRatio, true);
@@ -441,10 +440,6 @@ struct Values {
     // vectors in its place. EDEN_OOT_DLSS=1 / EDEN_OOT_NO_SHARPEN=1 override it.
     SwitchableSetting<OotAntiAliasing> oot_anti_aliasing{linkage, OotAntiAliasing::Game,
                                                          "oot_anti_aliasing", Category::Renderer};
-    // Ocarina of Time's DLSS output is 4K (the game's 2560x1440 at 1.5x): Quality from
-    // 2560x1440, or DLAA with the 3D at 3840x2160 too. EDEN_OOT_DLSS_OUTPUT overrides it.
-    SwitchableSetting<OotDlssOutput> oot_dlss_output{linkage, OotDlssOutput::Quality4k,
-                                                     "oot_dlss_output", Category::Renderer};
 
     SwitchableSetting<std::string> post_shader_chain{linkage,
                                                      std::string(),
