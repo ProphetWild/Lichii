@@ -99,6 +99,8 @@ private:
     vk::SurfaceKHR surface;
 
     Device device;
+    /// The surface was made again through NVIDIA Streamline once frame generation took the device.
+    bool streamline_surface{};
     MemoryAllocator memory_allocator;
     StateTracker state_tracker;
     Scheduler scheduler;

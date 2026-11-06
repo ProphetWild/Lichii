@@ -1286,6 +1286,8 @@ bool EmulatedController::SetVibration(DeviceIndex device_index, const VibrationV
         .high_amplitude = (std::min)(vibration.high_amplitude * strength, 1.0f),
         .high_frequency = vibration.high_frequency,
         .type = type,
+        .side = device_index == DeviceIndex::Left ? Common::Input::VibrationSide::Left
+                                                  : Common::Input::VibrationSide::Right,
     };
 
     // Send vibrations to Android's input overlay

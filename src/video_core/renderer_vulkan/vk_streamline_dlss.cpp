@@ -3,11 +3,16 @@
 
 // NVIDIA DLSS (through NVIDIA Streamline) in place of a game's DLSS evaluation.
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdlib>
+#include <optional>
+#include <utility>
 #include <string_view>
 
 #include "common/logging.h"
+#include "common/settings.h"
 #include "video_core/dlss_evaluation.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_streamline_dlss.h"
@@ -70,6 +75,147 @@ sl::float4x4 Identity() {
     matrix.setRow(2, {0.0f, 0.0f, 1.0f, 0.0f});
     matrix.setRow(3, {0.0f, 0.0f, 0.0f, 1.0f});
     return matrix;
+}
+
+/// Row-major, for column vectors (the game's convention).
+using Matrix = std::array<f32, 16>;
+
+Matrix Multiply(const Matrix& a, const Matrix& b) {
+    Matrix result{};
+    for (int row = 0; row < 4; ++row) {
+        for (int column = 0; column < 4; ++column) {
+            f32 sum = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+                sum += a[row * 4 + k] * b[k * 4 + column];
+            }
+            result[row * 4 + column] = sum;
+        }
+    }
+    return result;
+}
+
+std::optional<Matrix> Invert(const Matrix& m) {
+    // Gauss-Jordan with partial pivoting, in double.
+    std::array<std::array<double, 8>, 4> a{};
+    for (int row = 0; row < 4; ++row) {
+        for (int column = 0; column < 4; ++column) {
+            a[row][column] = m[row * 4 + column];
+        }
+        a[row][4 + row] = 1.0;
+    }
+    for (int column = 0; column < 4; ++column) {
+        int pivot = column;
+        for (int row = column + 1; row < 4; ++row) {
+            if (std::abs(a[row][column]) > std::abs(a[pivot][column])) {
+                pivot = row;
+            }
+        }
+        if (std::abs(a[pivot][column]) < 1e-12) {
+            return std::nullopt;
+        }
+        std::swap(a[column], a[pivot]);
+        const double scale = 1.0 / a[column][column];
+        for (double& value : a[column]) {
+            value *= scale;
+        }
+        for (int row = 0; row < 4; ++row) {
+            if (row != column) {
+                const double factor = a[row][column];
+                for (int k = 0; k < 8; ++k) {
+                    a[row][k] -= factor * a[column][k];
+                }
+            }
+        }
+    }
+    Matrix result{};
+    for (int row = 0; row < 4; ++row) {
+        for (int column = 0; column < 4; ++column) {
+            result[row * 4 + column] = static_cast<f32>(a[row][4 + column]);
+        }
+    }
+    return result;
+}
+
+/// Streamline's matrices are row-major for row vectors: the transpose of ours.
+sl::float4x4 ToStreamline(const Matrix& m) {
+    sl::float4x4 matrix;
+    for (int row = 0; row < 4; ++row) {
+        matrix.setRow(row, {m[row], m[4 + row], m[8 + row], m[12 + row]});
+    }
+    return matrix;
+}
+
+/// Frame generation's camera constants from the game's OpenGL-style matrices. Streamline's clip
+/// space has z = depth in [0, 1] and y up on screen; the game's NDC has z = depth * 2 - 1 and y
+/// as the image rows go, upward only with flip_y. Returns false when the matrices don't look
+/// like a perspective camera (the constants then keep their identities).
+bool SetCameraConstants(sl::Constants& constants,
+                        const StreamlineDlssUpscaler::Inputs::Camera& camera, f32 aspect) {
+    const f32 y = camera.flip_y ? 1.0f : -1.0f;
+    const Matrix to_game{1, 0, 0, 0, 0, y, 0, 0, 0, 0, 2, -1, 0, 0, 0, 1};
+    const Matrix from_game{1, 0, 0, 0, 0, y, 0, 0, 0, 0, 0.5f, 0.5f, 0, 0, 0, 1};
+    const Matrix clip_to_previous = Multiply(from_game, Multiply(camera.reproject, to_game));
+    const std::optional<Matrix> previous_to_clip = Invert(clip_to_previous);
+    if (!previous_to_clip) {
+        return false;
+    }
+    // A perspective view-projection: row 3 is minus the view's z axis (clip w = -z), rows 0 and
+    // 1 the view's x and y axes scaled by the projection, row 2 a mix of row 3 and a constant.
+    const f32* m = camera.view_projection.data();
+    const auto length = [](const f32* v) { return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); };
+    const f32 scale_x = length(m);
+    const f32 scale_y = length(m + 4);
+    const f32 scale_w = length(m + 12);
+    if (scale_x < 1e-4f || scale_y < 1e-4f || scale_w < 1e-4f) {
+        return false;
+    }
+    std::array<f32, 4> view_z{};
+    for (int i = 0; i < 4; ++i) {
+        view_z[i] = -m[12 + i] / scale_w;
+    }
+    const f32 a = m[8] * view_z[0] + m[9] * view_z[1] + m[10] * view_z[2];
+    const f32 b = m[11] - a * view_z[3];
+    const f32 near_plane = b / (a - 1.0f);
+    const f32 far_plane = b / (a + 1.0f);
+    const bool planes_valid = std::isfinite(near_plane) && std::isfinite(far_plane) &&
+                              near_plane > 0.0f && far_plane > near_plane;
+    const Matrix projection{scale_x, 0, 0, 0, 0, scale_y, 0, 0, 0, 0, a, b, 0, 0, -1, 0};
+    const Matrix view_to_clip = Multiply(from_game, projection);
+    const std::optional<Matrix> clip_to_view = Invert(view_to_clip);
+    if (!clip_to_view) {
+        return false;
+    }
+    constants.cameraViewToClip = ToStreamline(view_to_clip);
+    constants.clipToCameraView = ToStreamline(*clip_to_view);
+    constants.clipToPrevClip = ToStreamline(clip_to_previous);
+    constants.prevClipToClip = ToStreamline(*previous_to_clip);
+    const sl::float3 right{m[0] / scale_x, m[1] / scale_x, m[2] / scale_x};
+    const sl::float3 up{m[4] / scale_y, m[5] / scale_y, m[6] / scale_y};
+    const sl::float3 forward{-view_z[0], -view_z[1], -view_z[2]};
+    const f32 tx = m[3] / scale_x;
+    const f32 ty = m[7] / scale_y;
+    const f32 tz = view_z[3];
+    constants.cameraRight = right;
+    constants.cameraUp = up;
+    constants.cameraFwd = forward;
+    constants.cameraPos = {-(tx * right.x + ty * up.x + tz * view_z[0]),
+                           -(tx * right.y + ty * up.y + tz * view_z[1]),
+                           -(tx * right.z + ty * up.z + tz * view_z[2])};
+    if (planes_valid) {
+        constants.cameraNear = near_plane;
+        constants.cameraFar = far_plane;
+    }
+    constants.cameraFOV = 2.0f * std::atan(1.0f / scale_y);
+    constants.cameraAspectRatio = aspect;
+    if (static u32 calls{}; calls++ % 1800 == 0) {
+        LOG_INFO(Render_Vulkan,
+                 "DLSS camera: near {:.3f}, far {:.1f}{}, vertical FOV {:.1f} degrees, position "
+                 "({:.1f}, {:.1f}, {:.1f})",
+                 near_plane, far_plane, planes_valid ? "" : " (not used)",
+                 constants.cameraFOV * 57.2958f, constants.cameraPos.x, constants.cameraPos.y,
+                 constants.cameraPos.z);
+    }
+    return true;
 }
 
 VkImageMemoryBarrier Barrier(const StreamlineDlssUpscaler::Image& image, VkAccessFlags src_access,
@@ -155,6 +301,7 @@ void StreamlineDlssUpscaler::CreateOutput(VkExtent2D upscale_size) {
     if (output_image) {
         scheduler.Finish(); // the old output may still be in use
     }
+    const auto create = [&](vk::Image& output_image, vk::ImageView& output_view) {
     output_image = memory_allocator.CreateImage(VkImageCreateInfo{
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .pNext = nullptr,
@@ -211,6 +358,8 @@ void StreamlineDlssUpscaler::CreateOutput(VkExtent2D upscale_size) {
                                    },
                                });
     });
+    };
+    create(output_image, output_view);
 }
 
 bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
@@ -238,10 +387,34 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
     options.mode = ModeFor(in.render_size, in.upscale_size);
     options.outputWidth = in.upscale_size.width;
     options.outputHeight = in.upscale_size.height;
-    options.colorBuffersHDR = EnvInt("EDEN_NX2_DLSS_HDR", 1) != 0 ? sl::eTrue : sl::eFalse;
-    options.useAutoExposure =
-        EnvInt("EDEN_NX2_DLSS_AUTO_EXPOSURE", 1) != 0 ? sl::eTrue : sl::eFalse;
-    const sl::DLSSPreset preset = Preset();
+    options.colorBuffersHDR =
+        (in.color_hdr >= 0 ? in.color_hdr : EnvInt("EDEN_NX2_DLSS_HDR", 1)) != 0 ? sl::eTrue
+                                                                                 : sl::eFalse;
+    options.useAutoExposure = in.color_hdr != 0 && EnvInt("EDEN_NX2_DLSS_AUTO_EXPOSURE", 1) != 0
+                                  ? sl::eTrue
+                                  : sl::eFalse;
+    // The DLSS preset setting, else the caller's choice, else Preset() (EDEN_NX2_DLSS_PRESET).
+    int chosen = in.preset;
+    switch (Settings::values.dlss_preset.GetValue()) {
+    case Settings::DlssPreset::K:
+        chosen = static_cast<int>(sl::DLSSPreset::ePresetK);
+        break;
+    case Settings::DlssPreset::L:
+        chosen = static_cast<int>(sl::DLSSPreset::ePresetL);
+        break;
+    case Settings::DlssPreset::M:
+        chosen = static_cast<int>(sl::DLSSPreset::ePresetM);
+        break;
+    default:
+        break;
+    }
+    const sl::DLSSPreset preset = chosen >= 0 && std::getenv("EDEN_NX2_DLSS_PRESET") == nullptr
+                                      ? static_cast<sl::DLSSPreset>(chosen)
+                                      : Preset();
+    if (static_cast<u32>(preset) != applied_preset_value) {
+        applied_preset_value = static_cast<u32>(preset);
+        options_changed = true;
+    }
     options.dlaaPreset = preset;
     options.qualityPreset = preset;
     options.balancedPreset = preset;
@@ -255,8 +428,14 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
                  static_cast<int>(preset));
     }
 
+    const u32 index = frame_index++;
+    const bool frame_generation = Streamline::IsFrameGenerationAvailable();
+    if (frame_generation) {
+        // The composition after this shows this frame; the present names it to Streamline.
+        Streamline::NoteUpscaledFrame(index);
+    }
     scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([this, in, reset, options, options_changed, index = frame_index++,
+    scheduler.Record([this, in, reset, options, options_changed, index, frame_generation,
                       output_image_handle = *output_image,
                       output_view_handle = *output_view](vk::CommandBuffer cmdbuf) {
         const Streamline::Api& api = Streamline::GetApi();
@@ -312,7 +491,8 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
         };
 
         // DLSS super resolution only reads the jitter, motion and depth conventions; the camera
-        // fields are for frame generation, which this doesn't use.
+        // fields are for frame generation, filled from the game's matrices when the caller has
+        // them.
         const f32 rw = static_cast<f32>(in.render_size.width);
         const f32 rh = static_cast<f32>(in.render_size.height);
         sl::Constants constants{};
@@ -333,11 +513,18 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
         constants.cameraFar = 1000.0f;
         constants.cameraFOV = 1.0f;
         constants.cameraAspectRatio = rw / rh;
-        constants.depthInverted = sl::eTrue;
+        constants.depthInverted = in.depth_inverted ? sl::eTrue : sl::eFalse;
         constants.cameraMotionIncluded = sl::eTrue;
         constants.motionVectors3D = sl::eFalse;
         constants.reset = reset ? sl::eTrue : sl::eFalse;
         constants.motionVectorsJittered = sl::eFalse;
+        if (in.camera && !SetCameraConstants(constants, *in.camera, rw / rh)) {
+            static bool logged{};
+            if (!std::exchange(logged, true)) {
+                LOG_WARNING(Render_Vulkan, "DLSS: the game's camera matrices are not invertible; "
+                                           "frame generation gets identity matrices");
+            }
+        }
 
         sl::Resource color = Resource(in.color.image, in.color.view, in.color.format,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, in.render_size,
@@ -403,7 +590,31 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
             [&] {
                 api_result = api.evaluate_feature(sl::kFeatureDLSS, *frame, inputs, std::size(inputs),
                                                   reinterpret_cast<sl::CommandBuffer*>(*cmdbuf));
-                return api_result == sl::Result::eOk;
+                if (api_result != sl::Result::eOk || !frame_generation) {
+                    return api_result == sl::Result::eOk;
+                }
+                // Frame generation runs at the present, after the game has drawn over depth and
+                // motion: Streamline copies them now. The game's own simulation and submission
+                // are not visible here, so this frame's latency markers all sit at its upscale.
+                api.pcl_set_marker(sl::PCLMarker::eSimulationStart, *frame);
+                api.pcl_set_marker(sl::PCLMarker::eSimulationEnd, *frame);
+                api.pcl_set_marker(sl::PCLMarker::eRenderSubmitStart, *frame);
+                const sl::ResourceTag fg_tags[] = {
+                    {&depth, sl::kBufferTypeDepth, sl::ResourceLifecycle::eOnlyValidNow,
+                     &render_area},
+                    {&motion, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eOnlyValidNow,
+                     &render_area},
+                };
+                if (const sl::Result tag_result = api.set_tag_for_frame(
+                        *frame, viewport, fg_tags, static_cast<uint32_t>(std::size(fg_tags)),
+                        reinterpret_cast<sl::CommandBuffer*>(*cmdbuf));
+                    tag_result != sl::Result::eOk) {
+                    LOG_WARNING(Render_Vulkan,
+                                "Tagging frame generation inputs failed (Streamline result {})",
+                                static_cast<int>(tag_result));
+                }
+                api.pcl_set_marker(sl::PCLMarker::eRenderSubmitEnd, *frame);
+                return true;
             },
             [&] {
                 cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,

@@ -1232,6 +1232,9 @@ private:
     /// Returns a list of queue initialization descriptors.
     std::vector<VkDeviceQueueCreateInfo> GetDeviceQueueCreateInfos() const;
 
+    /// Queues to create in the graphics family: ours, then NVIDIA Streamline's (frame generation).
+    u32 GraphicsFamilyQueueCount() const;
+
     /// Returns true if ASTC textures are natively supported.
     bool ComputeIsOptimalAstcSupported() const;
 

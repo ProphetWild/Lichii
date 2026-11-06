@@ -16,6 +16,8 @@
 #include <numeric>
 #include <optional>
 #include <span>
+#include <tuple>
+#include <chrono>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -711,6 +713,58 @@ private:
         }
         device_memory.ArmReadTraps(begin, end - begin);
     }
+
+    /// Switch 2 titles flush GPU-written pages when the guest CPU reads them, a wait for the
+    /// whole GPU queue each time. Where the CPU keeps reading (a counter polled every frame, or
+    /// per-object results read back from one buffer), the pages it reads are made Preflushable
+    /// instead, as every read page of a Switch 1 title is: their GPU writes come back at fences,
+    /// which the guest waits on before it relies on GPU results, and the reads stop waiting.
+    /// A 64 KiB block is hot once the CPU reads it EDEN_NX2_HOT_READS times within a second
+    /// (default 4, 0: off); at most EDEN_NX2_HOT_READ_PAGES pages (default 512) are marked, so
+    /// fence downloads stay small.
+    bool Nx2HotReadPage(DAddr page) {
+        static const u32 threshold = [] {
+            const char* value = std::getenv("EDEN_NX2_HOT_READS");
+            return value == nullptr ? 4U : static_cast<u32>(std::strtoul(value, nullptr, 10));
+        }();
+        static const size_t max_pages = [] {
+            const char* value = std::getenv("EDEN_NX2_HOT_READ_PAGES");
+            return value == nullptr ? size_t{512}
+                                    : static_cast<size_t>(std::strtoull(value, nullptr, 10));
+        }();
+        if (threshold == 0 || nx2_hot_read_pages >= max_pages) {
+            return false;
+        }
+        constexpr DAddr BLOCK_BITS = 16;
+        HotReadBlock& block = nx2_read_blocks[page >> BLOCK_BITS];
+        if (!block.hot) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - block.window_start > std::chrono::seconds{1}) {
+                block.window_start = now;
+                block.reads = 0;
+            }
+            if (++block.reads < threshold) {
+                return false;
+            }
+            block.hot = true;
+            LOG_INFO(HW_GPU,
+                     "GPU-written block {:#x} read {} times in a second by the CPU: its read "
+                     "pages are downloaded at fences from now on",
+                     page & ~((DAddr{1} << BLOCK_BITS) - 1), block.reads);
+        }
+        if (++nx2_hot_read_pages == max_pages) {
+            LOG_WARNING(HW_GPU, "{} GPU-written pages are downloaded at fences; no more are added",
+                        max_pages);
+        }
+        return true;
+    }
+    struct HotReadBlock {
+        std::chrono::steady_clock::time_point window_start{};
+        u32 reads{};
+        bool hot{};
+    };
+    std::unordered_map<DAddr, HotReadBlock> nx2_read_blocks;
+    size_t nx2_hot_read_pages{};
 
     ReadTrapTracker read_trapped_ranges;
     /// Ranges the guest CPU read after GPU writes. A read that must flush downloads the GPU

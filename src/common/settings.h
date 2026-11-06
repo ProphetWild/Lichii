@@ -64,6 +64,10 @@ SETTING(std::string, false);
 SETTING(u16, false);
 SWITCHABLE(AnisotropyMode, true);
 SWITCHABLE(AntiAliasing, false);
+SWITCHABLE(OotAntiAliasing, false);
+SWITCHABLE(OotDlssOutput, false);
+SWITCHABLE(DlssPreset, false);
+SWITCHABLE(DlssFrameGeneration, false);
 SWITCHABLE(AspectRatio, true);
 SWITCHABLE(AstcDecodeMode, true);
 SWITCHABLE(AstcRecompression, true);
@@ -273,6 +277,10 @@ struct Values {
                                               Specialization::Default,
                                               true,
                                               true};
+    // Time boost: game time also runs at the CPU clock's factor (CPU Clocks' original behaviour,
+    // 1.7x on Boost). Lifts frame-rate limits that wait on time, but speeds games up.
+    SwitchableSetting<bool> cpu_clock_scales_time{linkage, false, "cpu_clock_scales_time",
+                                                  Category::System};
 
     SwitchableSetting<bool> use_custom_cpu_ticks{linkage,
                                                  false,
@@ -335,6 +343,11 @@ struct Values {
                                                                 linkage, true, "cpuopt_unsafe_ignore_global_monitor", Category::CpuUnsafe};
 
     // Renderer
+    SwitchableSetting<bool> hdr{linkage, false, "hdr", Category::Renderer};
+    SwitchableSetting<u16, true> hdr_reference_white{linkage, 200, 0, 1000, "hdr_reference_white",
+                                                  Category::Renderer, Specialization::Scalar};
+    SwitchableSetting<u16, true> hdr_peak_luminance{linkage, 300, 80, 10000, "hdr_peak_luminance",
+                                                 Category::Renderer, Specialization::Scalar};
     SwitchableSetting<RendererBackend, true> renderer_backend{linkage,
 #if defined(__sun__) || defined(__managarm__)
         RendererBackend::OpenGL_GLSL,
@@ -384,6 +397,29 @@ struct Values {
                                                        true};
     // NVIDIA DLSS (through NVIDIA Streamline) in place of a game's DLSS.
     SwitchableSetting<bool> nvidia_dlss{linkage, false, "nvidia_dlss", Category::Renderer};
+    // AMD RCAS sharpening on NVIDIA DLSS's output (DLSS has none of its own since 3.1), in
+    // percent; 0 leaves it unsharpened.
+    SwitchableSetting<int, true> dlss_sharpening{linkage,
+                                                 0,
+                                                 0,
+                                                 100,
+                                                 "dlss_sharpening",
+                                                 Category::Renderer,
+                                                 Specialization::Scalar |
+                                                     Specialization::Percentage,
+                                                 true,
+                                                 true};
+    // NVIDIA DLSS's model; Auto lets the caller choose (preset M for Ocarina of Time).
+    SwitchableSetting<DlssPreset> dlss_preset{linkage, DlssPreset::Auto, "dlss_preset",
+                                              Category::Renderer};
+    // Frames shown per rendered frame with DLSS Frame Generation (multi frame generation is
+    // limited to what the GPU and driver allow).
+    SwitchableSetting<DlssFrameGeneration> dlss_frame_generation_multiplier{
+        linkage, DlssFrameGeneration::X2, "dlss_frame_generation_multiplier", Category::Renderer};
+    // NVIDIA DLSS Frame Generation (Streamline DLSS-G) on frames NVIDIA DLSS upscaled.
+    SwitchableSetting<bool> nvidia_dlss_frame_generation{linkage, false,
+                                                         "nvidia_dlss_frame_generation",
+                                                         Category::Renderer};
     SwitchableSetting<AspectRatio, true> aspect_ratio{linkage,
                                                       AspectRatio::R16_9,
                                                       "aspect_ratio",
@@ -399,6 +435,17 @@ struct Values {
                                                   Specialization::Default,
                                                   true,
                                                   true};
+
+    // The Legend of Zelda: Ocarina of Time's own anti-aliasing network (with heavy sharpening),
+    // none (the tonemapped image as it is), or NVIDIA DLSS with jitter and camera motion
+    // vectors in its place. EDEN_OOT_DLSS=1 / EDEN_OOT_NO_SHARPEN=1 override it.
+    SwitchableSetting<OotAntiAliasing> oot_anti_aliasing{linkage, OotAntiAliasing::Game,
+                                                         "oot_anti_aliasing", Category::Renderer};
+    // Ocarina of Time's DLSS output is 4K (the game's 2560x1440 at 1.5x), Quality from 2560x1440.
+    // Not shown in the UI: 4K DLAA (the 3D at 1.5x too) is shelved until the game renders
+    // correctly at 1.5x; EDEN_OOT_DLSS_OUTPUT=dlaa selects it for development.
+    SwitchableSetting<OotDlssOutput> oot_dlss_output{linkage, OotDlssOutput::Quality4k,
+                                                     "oot_dlss_output", Category::Renderer};
 
     SwitchableSetting<std::string> post_shader_chain{linkage,
                                                      std::string(),
@@ -811,6 +858,10 @@ struct Values {
     Setting<bool> controller_navigation{linkage, true, "controller_navigation", Category::Controls};
     Setting<bool> enable_joycon_driver{linkage, true, "enable_joycon_driver", Category::Controls};
     Setting<bool> enable_procon_driver{linkage, false, "enable_procon_driver", Category::Controls};
+    Setting<bool> enable_steam_controller_driver{linkage, true, "enable_steam_controller_driver",
+                                                 Category::Controls};
+    Setting<bool> steam_controller_hd_rumble{linkage, true, "steam_controller_hd_rumble",
+                                             Category::Controls};
 
     SwitchableSetting<bool> vibration_enabled{linkage, true, "vibration_enabled",
                                               Category::Controls};

@@ -52,6 +52,8 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/vk_oot_object_motion.h"
+#include "video_core/oot_dlss.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
@@ -427,10 +429,30 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         Profile::Scope scope{Profile::Zone::PipelineLookup};
         return pipeline_cache.CurrentGraphicsPipeline();
     }()};
+    if (VideoCommon::OotDlss::Requested() &&
+        Settings::GetCurrentProgramID() == VideoCommon::OotDlss::ProgramId) [[unlikely]] {
+        CaptureOotCamera();
+    }
+    if (pipeline && VideoCommon::OotDlss::ReplacesNetwork() &&
+        Settings::GetCurrentProgramID() == VideoCommon::OotDlss::ProgramId) [[unlikely]] {
+        for (const u64 hash : pipeline->ShaderHashes()) {
+            if (VideoCommon::OotDlss::IsTonemapShader(hash)) {
+                const u64 target = maxwell3d->regs.rt[0].Address();
+                auto& tonemapped = VideoCommon::OotDlss::Targets().tonemapped_gpu;
+                if (target != 0 && tonemapped.exchange(target, std::memory_order_relaxed) != target) {
+                    LOG_INFO(Render_Vulkan, "OoT DLSS: tonemapped scene at {:#x}", target);
+                }
+                break;
+            }
+        }
+    }
     if (!pipeline) {
         report_failure("no pipeline");
         TraceRenderState(is_indexed, "no-pipeline", nullptr);
         return;
+    }
+    if (pipeline->UsesOotMotion()) [[unlikely]] {
+        PrepareOotObjectMotion();
     }
     // Task/mesh pipelines: the draw's vertex count is the number of task workgroups.
     mesh_draw = pipeline->IsMeshPipeline();
@@ -520,7 +542,12 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         Profile::Scope scope{Profile::Zone::DrawRecord};
         scheduler.TraceGraphicsPipeline(pipeline->ShaderHashes());
         trace_draw_hashes = {pipeline->ShaderHashes()[1], pipeline->ShaderHashes()[5]};
+        oot_motion_pipeline = pipeline->UsesOotMotion() ? pipeline : nullptr;
+        if (oot_motion_pipeline && is_indirect) [[unlikely]] {
+            PushOotObjectMotion(0, 0, 0, 0, false, false);
+        }
         draw_func();
+        oot_motion_pipeline = nullptr;
     }
     submitted = true;
     static u32 native_capture_count{};
@@ -799,6 +826,10 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
         }
 
         if (mesh_draw) {
+            if (oot_motion_pipeline) [[unlikely]] {
+                PushOotObjectMotion(draw_params.base_vertex, draw_params.num_vertices, 1, 0, false,
+                                    true);
+            }
             scheduler.Record([this, groups = draw_params.num_vertices](vk::CommandBuffer cmdbuf) {
                 if (scheduler.GraphicsPipelineMissing()) {
                     return;
@@ -806,6 +837,11 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
                 cmdbuf.DrawMeshTasksEXT(groups, 1, 1);
             });
             return;
+        }
+        if (oot_motion_pipeline) [[unlikely]] {
+            PushOotObjectMotion(draw_params.base_vertex, draw_params.num_vertices,
+                                draw_params.num_instances, draw_params.base_instance,
+                                draw_params.is_indexed, true);
         }
         scheduler.Record([this, draw_params, hashes = trace_draw_hashes](vk::CommandBuffer cmdbuf) {
             if (scheduler.GraphicsPipelineMissing()) {
@@ -1976,6 +2012,16 @@ void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
 }
 
 void RasterizerVulkan::TickFrame() {
+    if (oot_object_motion) {
+        oot_object_motion->EnsureImage(scheduler, OotObjectMotionSize());
+    }
+    if (VideoCommon::OotDlss::Requested()) {
+        const u64 frame = VideoCommon::OotDlss::FrameCounter().fetch_add(1, std::memory_order_relaxed);
+        if (frame % 600 == 599) {
+            LOG_INFO(Render_Vulkan, "OoT DLSS: {} jittered viewport updates in the last 600 frames",
+                     std::exchange(oot_jittered_updates, 0));
+        }
+    }
     if (VideoCore::Nx2Debug::HasRequests()) {
         if (auto capture = VideoCore::Nx2Debug::TakeCapture()) {
             frame_dump.Arm(std::move(capture->directory), capture->sampled, capture->buffers,
@@ -2113,6 +2159,16 @@ bool RasterizerVulkan::AccelerateTemporalUpscale(
     std::scoped_lock lock{texture_cache.mutex};
     return texture_cache.TemporalUpscale(dst, src, motion_vectors, depth, jitter, motion_scale,
                                           use_history);
+}
+
+bool RasterizerVulkan::AccelerateOotDlss(const Tegra::Engines::Fermi2D::Surface& src,
+                                         const Tegra::Engines::Fermi2D::Surface& dst,
+                                         const Tegra::Texture::TICEntry& depth,
+                                         std::array<f32, 2> jitter,
+                                         const std::array<f32, 16>& reproject, bool flip_y,
+                                         bool reset) {
+    std::scoped_lock lock{texture_cache.mutex};
+    return texture_cache.OotDlss(dst, src, depth, jitter, reproject, flip_y, reset);
 }
 
 Tegra::Engines::AccelerateDMAInterface& RasterizerVulkan::AccessAccelerateDMA() {
@@ -2444,10 +2500,300 @@ void RasterizerVulkan::HandleTransformFeedback() {
     }
 }
 
-void RasterizerVulkan::UpdateViewportsState(Tegra::Engines::Maxwell3D::Regs& regs) {
-    if (!state_tracker.TouchViewports()) {
+void RasterizerVulkan::CaptureOotCamera() {
+    using namespace VideoCommon::OotDlss;
+    const auto& regs = maxwell3d->regs;
+    const u64 depth = Targets().depth_gpu.load(std::memory_order_relaxed);
+    if (depth == 0 || !regs.zeta_enable || regs.zeta.Address() != depth) {
         return;
     }
+    Camera& camera = CurrentCamera();
+    const u64 frame = SceneFrame().load(std::memory_order_relaxed);
+    std::scoped_lock lock{camera.mutex};
+    if (camera.frame != frame) {
+        camera.frame = frame;
+        camera.valid = false;
+        camera.moving = false;
+        camera.searched = 0;
+    }
+    if (camera.moving || camera.searched >= 64) {
+        return;
+    }
+    ++camera.searched;
+    // The scene draws' vertex constant buffers hold this frame's and last frame's
+    // view-projection; their offsets differ between shaders, so look for two perspective
+    // matrices that are close to each other (this frame's first). Some buffers hold the same
+    // matrix twice: a pair that differs wins, and later draws are searched until one does (with
+    // a still camera, an identical pair is right).
+    constexpr u32 MaxBytes = 0x800;
+    std::array<float, MaxBytes / 4> words{};
+    static std::pair<u32, u32> logged_offsets{~0u, ~0u};
+    for (u32 slot = 0; slot < Tegra::Engines::Maxwell3D::Regs::MaxConstBuffers; ++slot) {
+        const u32 index = slot == 0 ? 3 : (slot == 3 ? 0 : slot);
+        const auto& cbuf = maxwell3d->state.shader_stages[0].const_buffers[index];
+        const u32 size = cbuf.enabled ? (std::min)(cbuf.size, MaxBytes) & ~15u : 0;
+        if (size < 128 || !gpu_memory->IsFullyMappedRange(cbuf.address, size)) {
+            continue;
+        }
+        gpu_memory->ReadBlockUnsafe(cbuf.address, words.data(), size);
+        boost::container::small_vector<u32, 8> candidates;
+        for (u32 offset = 0; offset + 64 <= size; offset += 16) {
+            if (IsPerspective(words.data() + offset / 4)) {
+                candidates.push_back(offset);
+            }
+        }
+        for (size_t a = 0; a < candidates.size(); ++a) {
+            for (size_t b = a + 1; b < candidates.size(); ++b) {
+                const float* current = words.data() + candidates[a] / 4;
+                const float* previous = words.data() + candidates[b] / 4;
+                if (candidates[b] < candidates[a] + 64) {
+                    continue; // overlapping rows of one matrix
+                }
+                float difference = 0.0f, magnitude = 0.0f;
+                for (int i = 0; i < 16; ++i) {
+                    difference += std::abs(current[i] - previous[i]);
+                    magnitude += std::abs(current[i]);
+                }
+                if (difference > 0.3f * magnitude || (camera.valid && difference == 0.0f)) {
+                    continue;
+                }
+                std::array<float, 16> view_projection{};
+                std::array<float, 16> previous_view_projection{};
+                std::copy_n(current, 16, view_projection.begin());
+                std::copy_n(previous, 16, previous_view_projection.begin());
+                const auto inverse = Inverse(view_projection);
+                if (!inverse) {
+                    continue;
+                }
+                const auto reproject = Multiply(previous_view_projection, *inverse);
+                if (!std::ranges::all_of(reproject, [](float v) { return std::isfinite(v); })) {
+                    continue;
+                }
+                camera.reproject = reproject;
+                camera.view_projection = view_projection;
+                camera.valid = true;
+                camera.moving = difference > 0.0f;
+                const std::pair offsets{index << 16 | candidates[a], candidates[b]};
+                static u32 changes{};
+                if (offsets != logged_offsets && changes < 32) {
+                    logged_offsets = offsets;
+                    ++changes;
+                    LOG_INFO(Render_Vulkan,
+                             "OoT DLSS camera: c[{}] view-projection at {:#x}, previous at {:#x} "
+                             "({})",
+                             index, candidates[a], candidates[b],
+                             camera.moving ? "differ" : "identical");
+                }
+                if (camera.moving) {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+void RasterizerVulkan::OotSceneEnd() {
+    if (oot_object_motion) {
+        oot_object_motion->BeginFrame(scheduler);
+    }
+}
+
+void RasterizerVulkan::PrepareOotObjectMotion() {
+    // The image only changes size in TickFrame: fast draws reuse descriptors within a frame.
+    if (!oot_object_motion) {
+        oot_object_motion = std::make_unique<OotObjectMotion>(device, memory_allocator);
+        oot_object_motion->EnsureImage(scheduler, OotObjectMotionSize());
+    }
+}
+
+VkExtent2D RasterizerVulkan::OotObjectMotionSize() const {
+    const auto& targets = VideoCommon::OotDlss::Targets();
+    u32 width = targets.depth_width.load(std::memory_order_relaxed);
+    u32 height = targets.depth_height.load(std::memory_order_relaxed);
+    if (width == 0 || height == 0) {
+        return VkExtent2D{1, 1};
+    }
+    if (VideoCommon::OotDlss::SceneRescaled()) {
+        width = Settings::values.resolution_info.ScaleUp(width);
+        height = Settings::values.resolution_info.ScaleUp(height);
+    }
+    return VkExtent2D{width, height};
+}
+
+std::optional<std::pair<u32, u32>> RasterizerVulkan::OotIndexBounds() {
+    const auto& index_buffer = maxwell3d->draw_manager.draw_state.index_buffer;
+    const auto& restart = maxwell3d->regs.primitive_restart;
+    const u64 key = (index_buffer.IndexStart() * 0x9E3779B97F4A7C15ULL) ^
+                    (u64{index_buffer.count} << 32) ^
+                    (static_cast<u64>(index_buffer.format) << 60) ^
+                    (restart.enabled ? u64{restart.index} * 0xC2B2AE3D27D4EB4FULL : 0);
+    if (const auto it = oot_index_bounds.find(key); it != oot_index_bounds.end()) {
+        return it->second;
+    }
+    const size_t index_size = index_buffer.FormatSizeInBytes();
+    const size_t bytes = size_t{index_buffer.count} * index_size;
+    constexpr size_t MaxBytes = size_t{16} << 20;
+    if (bytes == 0 || bytes > MaxBytes ||
+        !gpu_memory->IsFullyMappedRange(index_buffer.IndexStart(), bytes)) {
+        return std::nullopt;
+    }
+    oot_index_scratch.resize(bytes);
+    gpu_memory->ReadBlockUnsafe(index_buffer.IndexStart(), oot_index_scratch.data(), bytes);
+    u32 low = ~0u;
+    u32 high = 0;
+    const u32 restart_index = restart.enabled ? restart.index : ~0u;
+    const auto scan = [&](const auto* indices) {
+        for (u32 i = 0; i < index_buffer.count; ++i) {
+            const u32 value = indices[i];
+            if (value == restart_index) {
+                continue;
+            }
+            low = (std::min)(low, value);
+            high = (std::max)(high, value);
+        }
+    };
+    switch (index_size) {
+    case 1:
+        scan(oot_index_scratch.data());
+        break;
+    case 2:
+        scan(reinterpret_cast<const u16*>(oot_index_scratch.data()));
+        break;
+    default:
+        scan(reinterpret_cast<const u32*>(oot_index_scratch.data()));
+        break;
+    }
+    if (low > high) {
+        return std::nullopt;
+    }
+    if (oot_index_bounds.size() > 65536) {
+        oot_index_bounds.clear();
+    }
+    oot_index_bounds.emplace(key, std::make_pair(low, high));
+    return std::make_pair(low, high);
+}
+
+void RasterizerVulkan::PushOotObjectMotion(u32 base_vertex, u32 num_vertices, u32 num_instances,
+                                           u32 base_instance, bool is_indexed, bool enabled) {
+    GraphicsPipeline* const pipeline = std::exchange(oot_motion_pipeline, nullptr);
+    if (!pipeline) {
+        return;
+    }
+    using Layout = OotObjectMotion::Layout;
+    Layout data{.flags = 0};
+    const auto& regs = maxwell3d->regs;
+    const auto& draw_state = maxwell3d->draw_manager.draw_state;
+    const auto& targets = VideoCommon::OotDlss::Targets();
+    const u32 depth_width = targets.depth_width.load(std::memory_order_relaxed);
+    const u32 depth_height = targets.depth_height.load(std::memory_order_relaxed);
+    const bool scene = depth_width != 0 && regs.zeta_enable && regs.zeta.Address() != 0 &&
+                       regs.zeta_size.width == depth_width &&
+                       regs.zeta_size.height == depth_height &&
+                       regs.zeta.format == Tegra::DepthFormat::Z32_FLOAT &&
+                       // Only draws that leave their depth can be told apart from what covers
+                       // them (fullscreen fog and lighting passes write no depth).
+                       regs.depth_test_enable != 0 && regs.depth_write_enabled != 0;
+    const bool quads = draw_state.topology == Maxwell::PrimitiveTopology::Quads ||
+                       draw_state.topology == Maxwell::PrimitiveTopology::QuadStrip;
+    const VkExtent2D size = OotObjectMotionSize();
+    const bool sized = oot_object_motion && oot_object_motion->HasImage() && size.width > 1 &&
+                       oot_object_motion->Extent().width == size.width &&
+                       oot_object_motion->Extent().height == size.height;
+    if (const u32 mesh_vertices = pipeline->OotMeshMaxVertices();
+        enabled && scene && sized && mesh_vertices != 0) {
+        // Mesh draw: `num_vertices` workgroups, each with its own run of history slots.
+        const auto& hashes = pipeline->ShaderHashes();
+        u64 identity = 0x84222325cbf29ce4ULL;
+        for (const u64 value : {hashes[1], hashes[2], hashes[5], u64{base_vertex},
+                                u64{num_vertices}, u64{mesh_vertices}}) {
+            identity = (identity ^ value) * 0x100000001b3ULL;
+            identity ^= identity >> 31;
+        }
+        constexpr u32 MaxWorkgroups = 1u << 16;
+        if (num_vertices != 0 && num_vertices <= MaxWorkgroups) {
+            // Two history entries per vertex (position, signature: EmitOotMotionMeshVertex).
+            data = oot_object_motion->Allocate(identity, mesh_vertices * 2, num_vertices, 0, 0);
+            data.vertex_range = num_vertices;
+            data.image_width = size.width;
+        }
+    } else if (enabled && scene && !quads && sized) {
+        // Vertices per instance: the draw's own for plain draws; for indexed ones the range
+        // its indices span (VertexIndex is the index plus the base vertex).
+        u64 range = num_vertices;
+        u32 vertex_bias = base_vertex;
+        if (is_indexed) {
+            range = 0;
+            if (const auto bounds = OotIndexBounds()) {
+                range = u64{bounds->second} - bounds->first + 1;
+                vertex_bias = base_vertex + bounds->first;
+            }
+        }
+        constexpr u64 MaxRange = u64{1} << 20;
+        if (range != 0 && range <= MaxRange) {
+            const auto& hashes = pipeline->ShaderHashes();
+            u64 identity = 0xcbf29ce484222325ULL;
+            const auto mix = [&identity](u64 value) {
+                identity = (identity ^ value) * 0x100000001b3ULL;
+                identity ^= identity >> 31;
+            };
+            mix(hashes[1]);
+            mix(hashes[5]);
+            mix(is_indexed);
+            mix(base_vertex);
+            mix(num_vertices);
+            mix(num_instances);
+            mix(base_instance);
+            mix(range);
+            if (is_indexed) {
+                mix(draw_state.index_buffer.StartAddress());
+                mix(static_cast<u64>(draw_state.index_buffer.format));
+                mix(draw_state.index_buffer.first);
+            }
+            for (size_t index = 0; index < Maxwell::NumVertexArrays; ++index) {
+                mix(regs.vertex_streams[index].IsEnabled() ? regs.vertex_streams[index].stride
+                                                           : 0);
+            }
+            data = oot_object_motion->Allocate(identity, static_cast<u32>(range), num_instances,
+                                               vertex_bias, base_instance);
+            data.image_width = size.width;
+        }
+    }
+    scheduler.Record([this, pipeline, data](vk::CommandBuffer cmdbuf) {
+        if (scheduler.GraphicsPipelineMissing()) {
+            return;
+        }
+        cmdbuf.PushConstants(pipeline->PipelineLayout(), pipeline->PushConstantStages(),
+                             Shader::Backend::SPIRV::OOT_MOTION_OFFSET, sizeof(data), &data);
+    });
+}
+
+std::array<float, 2> RasterizerVulkan::OotDlssViewportJitter(
+    const Tegra::Engines::Maxwell3D::Regs& regs) const {
+    if (!VideoCommon::OotDlss::Requested() ||
+        Settings::GetCurrentProgramID() != VideoCommon::OotDlss::ProgramId) {
+        return {};
+    }
+    const auto& targets = VideoCommon::OotDlss::Targets();
+    const u32 width = targets.depth_width.load(std::memory_order_relaxed);
+    const u32 height = targets.depth_height.load(std::memory_order_relaxed);
+    if (width == 0 || !regs.zeta_enable || regs.zeta.Address() == 0 ||
+        regs.zeta_size.width != width || regs.zeta_size.height != height ||
+        regs.zeta.format != Tegra::DepthFormat::Z32_FLOAT) {
+        return {};
+    }
+    return VideoCommon::OotDlss::Jitter(
+        VideoCommon::OotDlss::SceneFrame().load(std::memory_order_relaxed));
+}
+
+void RasterizerVulkan::UpdateViewportsState(Tegra::Engines::Maxwell3D::Regs& regs) {
+    // The jitter depends on the bound depth target and the frame, which the viewport dirty flag
+    // does not track: re-send the viewports whenever it changes.
+    const std::array<float, 2> jitter = OotDlssViewportJitter(regs);
+    const bool jitter_changed = jitter != applied_viewport_jitter;
+    if (!state_tracker.TouchViewports() && !jitter_changed) {
+        return;
+    }
+    applied_viewport_jitter = jitter;
 
     maxwell3d->dirty.flags[Dirty::Scissors] = true;
 
@@ -2479,7 +2825,7 @@ void RasterizerVulkan::UpdateViewportsState(Tegra::Engines::Maxwell3D::Regs& reg
     }
     const bool is_rescaling{texture_cache.IsRescaling()};
     const float scale = is_rescaling ? Settings::values.resolution_info.up_factor : 1.0f;
-    const std::array viewport_list{
+    std::array viewport_list{
         GetViewportState(device, regs, 0, scale),  GetViewportState(device, regs, 1, scale),
         GetViewportState(device, regs, 2, scale),  GetViewportState(device, regs, 3, scale),
         GetViewportState(device, regs, 4, scale),  GetViewportState(device, regs, 5, scale),
@@ -2489,6 +2835,14 @@ void RasterizerVulkan::UpdateViewportsState(Tegra::Engines::Maxwell3D::Regs& reg
         GetViewportState(device, regs, 12, scale), GetViewportState(device, regs, 13, scale),
         GetViewportState(device, regs, 14, scale), GetViewportState(device, regs, 15, scale),
     };
+    if (jitter[0] != 0.0f || jitter[1] != 0.0f) {
+        // Shift the whole raster by a sub-pixel amount (scaled pixels when rescaling).
+        for (VkViewport& viewport : viewport_list) {
+            viewport.x += jitter[0];
+            viewport.y += jitter[1];
+        }
+        ++oot_jittered_updates;
+    }
     scheduler.Record([this, viewport_list](vk::CommandBuffer cmdbuf) {
         const u32 num_viewports = std::min<u32>(device.GetMaxViewports(), Maxwell::NumViewports);
         const vk::Span<VkViewport> viewports(viewport_list.data(), num_viewports);

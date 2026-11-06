@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <array>
+#include <span>
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -29,6 +31,7 @@
 #include "video_core/post_processing/fx_chain.h"
 #endif
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/renderer_vulkan/vk_blit_screen.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -124,6 +127,25 @@ Device CreateDevice(const vk::Instance& instance, const vk::InstanceDispatch& dl
     return Device(*instance, physical_device, surface, dld);
 }
 
+#ifdef EGLANTINE_STREAMLINE
+namespace {
+/// DLSS Frame Generation maps swapchains to windows through Streamline's surface hooks, which only
+/// work once Streamline has the device: the surface made for choosing the device is replaced.
+bool RecreateSurfaceForStreamline(const vk::Instance& instance, vk::InstanceDispatch& dld,
+                                  vk::SurfaceKHR& surface,
+                                  const Core::Frontend::EmuWindow::WindowSystemInfo& window_info) {
+    const PFN_vkVoidFunction destroy = Streamline::Proxy("vkDestroySurfaceKHR");
+    if (!destroy || !Streamline::Proxy("vkCreateWin32SurfaceKHR")) {
+        return false;
+    }
+    surface = vk::SurfaceKHR{};
+    dld.vkDestroySurfaceKHR = reinterpret_cast<PFN_vkDestroySurfaceKHR>(destroy);
+    surface = CreateSurface(instance, window_info);
+    return true;
+}
+} // Anonymous namespace
+#endif
+
 RendererVulkan::RendererVulkan(Core::Frontend::EmuWindow& emu_window,
                                Tegra::MaxwellDeviceMemoryManager& device_memory_,
                                Tegra::GPU& gpu_,
@@ -149,6 +171,10 @@ try
     // Create surface
     , surface(CreateSurface(instance, render_window.GetWindowInfo()))
     , device(CreateDevice(instance, dld, *surface))
+#ifdef EGLANTINE_STREAMLINE
+    , streamline_surface(RecreateSurfaceForStreamline(instance, dld, surface,
+                                                      render_window.GetWindowInfo()))
+#endif
     , memory_allocator(device)
     , state_tracker()
     , scheduler(device, state_tracker)
@@ -209,7 +235,7 @@ RendererVulkan::~RendererVulkan() {
 }
 
 void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebuffers) {
-    const bool trace = Common::DkbFrameTrace::Enabled();
+    const bool trace = Common::DkbFrameTrace::Enabled() || VideoCommon::Nx2Profile::Enabled();
     const auto entered = trace ? std::chrono::steady_clock::now()
                                : std::chrono::steady_clock::time_point{};
     SCOPE_EXIT {
@@ -226,32 +252,65 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     const auto acquiring = trace ? std::chrono::steady_clock::now()
                                  : std::chrono::steady_clock::time_point{};
     Frame* frame = present_manager.GetRenderFrame();
+#ifdef EGLANTINE_STREAMLINE
+    frame->dlss_frame = Streamline::TakeUpscaledFrame();
+#endif
     const auto acquired = trace ? std::chrono::steady_clock::now()
                                 : std::chrono::steady_clock::time_point{};
 
+#ifdef __ANDROID__
+    VkFormat output_format = VK_FORMAT_R8G8B8A8_UNORM;
+#else
+    VkFormat output_format = VK_FORMAT_B8G8R8A8_UNORM;
+#endif
+    const bool hdr_output =
+        Settings::values.hdr.GetValue() && framebuffers.size() == 1 &&
+        framebuffers.front().color_space != Tegra::ColorSpace::RGB709;
+    if (hdr_output) {
+        // The guest sees HDR availability, not individual encodings. Presentation must reject an
+        // unavailable pair rather than reinterpret an already-rendered HDR frame as SDR.
+        switch (framebuffers.front().color_space) {
+        case Tegra::ColorSpace::RGB2020_PQ:
+            output_format = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+            frame->color_space = VK_COLOR_SPACE_HDR10_ST2084_EXT;
+            break;
+        case Tegra::ColorSpace::RGB709_Linear:
+            output_format = VK_FORMAT_R16G16B16A16_SFLOAT;
+            frame->color_space = VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
+            break;
+        default:
+            break;
+        }
+    }
+
     scheduler.RequestOutsideRenderPassOperationContext();
     blit_swapchain.DrawToFrame(device, rasterizer, frame, framebuffers,
-                               render_window.GetFramebufferLayout(),
-                               present_manager.SwapchainImageCount(),
-                               swapchain.GetImageViewFormat());
+                              render_window.GetFramebufferLayout(),
+                              present_manager.SwapchainImageCount(), output_format, hdr_output);
 
 #ifdef HAS_LSFG
-    void(frame_gen.WantedGenerations(present_manager.MaxExtraFrames()));
+    if (hdr_output) {
+        frame_gen.Pause();
+    } else {
+        void(frame_gen.WantedGenerations(present_manager.MaxExtraFrames()));
 
-    frame_gen.Process(device, frame, present_manager.SwapchainImageFormat(),
-                      GuestExtent(framebuffers));
+        frame_gen.Process(device, frame, frame->image_format, GuestExtent(framebuffers));
 
-    const size_t generated_frames = frame_gen.GeneratedFrameCount();
-    for (size_t generation = 0; generation < generated_frames; ++generation) {
-        Frame* generated = present_manager.GetRenderFrame();
-        blit_swapchain.PrepareFrame(device, generated, render_window.GetFramebufferLayout());
-        frame_gen.GenerateInto(device, generated, generation);
-        scheduler.Flush(*generated->render_ready);
-        present_manager.Present(generated);
+        const size_t generated_frames = frame_gen.GeneratedFrameCount();
+        for (size_t generation = 0; generation < generated_frames; ++generation) {
+            Frame* generated = present_manager.GetRenderFrame();
+#ifdef EGLANTINE_STREAMLINE
+            generated->dlss_frame.reset();
+#endif
+            blit_swapchain.PrepareFrame(device, generated, render_window.GetFramebufferLayout());
+            frame_gen.GenerateInto(device, generated, generation);
+            scheduler.Flush(*generated->render_ready);
+            present_manager.Present(generated);
+        }
     }
 #endif
 
-    if (trace) {
+    if (Common::DkbFrameTrace::Enabled()) {
         scheduler.MarkFrameEnd(++trace_frame);
     }
     scheduler.Flush(*frame->render_ready);
@@ -272,7 +331,12 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
         const auto ms = [](auto duration) {
             return std::chrono::duration<double, std::milli>(duration).count();
         };
-        if (trace_cpu_rate.Ready(end)) {
+        VideoCommon::Nx2Profile::FrameMark({
+            .acquire_ms = ms(acquired - acquiring),
+            .record_submit_ms = ms(presenting - acquired),
+            .present_ms = ms(presented - presenting),
+        });
+        if (Common::DkbFrameTrace::Enabled() && trace_cpu_rate.Ready(end)) {
             LOG_INFO(Render_Vulkan,
                      "DKB renderer renderer_frame={} host_pacing_mode={} vsync_mode={} "
                      "cpu_frame_wall_ms={:.3f} "
@@ -331,7 +395,7 @@ vk::Buffer RendererVulkan::RenderToBuffer(std::span<const Tegra::FramebufferConf
     }();
 
     auto dst_buffer = CreateWrappedBuffer(memory_allocator, buffer_size, MemoryUsage::Download);
-    blit_capture.DrawToFrame(device, rasterizer, &frame, framebuffers, layout, 1, format);
+    blit_capture.DrawToFrame(device, rasterizer, &frame, framebuffers, layout, 1, format, false);
 
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([&](vk::CommandBuffer cmdbuf) {
@@ -347,6 +411,39 @@ vk::Buffer RendererVulkan::RenderToBuffer(std::span<const Tegra::FramebufferConf
     return dst_buffer;
 }
 
+namespace {
+// An HDR10 present (PQ, BT.2020) captures as PQ bytes; screenshots are SDR files. Decode, scale
+// reference white to 1.0, convert to BT.709, roll highlights off toward the peak and encode sRGB,
+// in place on B8G8R8A8 pixels.
+void ToneMapHdr10ToSdr(std::span<u8> bgra, float reference_white, float peak) {
+    std::array<float, 256> pq_to_relative{};
+    for (u32 i = 0; i < 256; ++i) {
+        const float e = std::pow(static_cast<float>(i) / 255.0f, 1.0f / 78.84375f);
+        const float y = std::pow((std::max)(e - 0.8359375f, 0.0f) / (18.8515625f - 18.6875f * e),
+                                 1.0f / 0.1593017578125f);
+        pq_to_relative[i] = y * 10000.0f / reference_white;
+    }
+    const float white = (std::max)(peak / reference_white, 1.0f);
+    const auto tone = [white](float x) {
+        x = (std::max)(x, 0.0f);
+        return x * (1.0f + x / (white * white)) / (1.0f + x); // extended Reinhard
+    };
+    const auto srgb = [](float x) -> u8 {
+        x = std::clamp(x, 0.0f, 1.0f);
+        const float v = x <= 0.0031308f ? x * 12.92f : 1.055f * std::pow(x, 1.0f / 2.4f) - 0.055f;
+        return static_cast<u8>(v * 255.0f + 0.5f);
+    };
+    for (size_t i = 0; i + 3 < bgra.size(); i += 4) {
+        const float r = pq_to_relative[bgra[i + 2]];
+        const float g = pq_to_relative[bgra[i + 1]];
+        const float b = pq_to_relative[bgra[i + 0]];
+        bgra[i + 2] = srgb(tone(1.6604910f * r - 0.5876411f * g - 0.0728499f * b));
+        bgra[i + 1] = srgb(tone(-0.1245505f * r + 1.1328999f * g - 0.0083494f * b));
+        bgra[i + 0] = srgb(tone(-0.0181508f * r - 0.1005789f * g + 1.1187297f * b));
+    }
+}
+} // Anonymous namespace
+
 void RendererVulkan::RenderScreenshot(std::span<const Tegra::FramebufferConfig> framebuffers) {
     if (!renderer_settings.screenshot_requested) {
         return;
@@ -361,6 +458,17 @@ void RendererVulkan::RenderScreenshot(std::span<const Tegra::FramebufferConfig> 
 
     std::memcpy(renderer_settings.screenshot_bits, dst_buffer.Mapped().data(),
                 dst_buffer.Mapped().size());
+    if (Settings::values.hdr.GetValue() && screenshot_layers.size() == 1 &&
+        screenshot_layers.front().color_space == Tegra::ColorSpace::RGB2020_PQ) {
+        const float peak = static_cast<float>(Settings::values.hdr_peak_luminance.GetValue());
+        const u16 reference = Settings::values.hdr_reference_white.GetValue();
+        // Zero reference white means the Switch 2 calibration default (peak / 1.5, 50..300).
+        const float white = reference > 0 ? (std::min)(static_cast<float>(reference), peak)
+                                          : std::clamp(peak / 1.5f, 50.0f, 300.0f);
+        ToneMapHdr10ToSdr(std::span{static_cast<u8*>(renderer_settings.screenshot_bits),
+                                    dst_buffer.Mapped().size()},
+                          white, peak);
+    }
     renderer_settings.screenshot_complete_callback(false);
     renderer_settings.screenshot_requested = false;
 }
@@ -410,7 +518,7 @@ void RendererVulkan::RenderAppletCaptureLayer(
 
     scheduler.RequestOutsideRenderPassOperationContext();
     blit_applet.DrawToFrame(device, rasterizer, &applet_frame, capture_layers, VideoCore::Capture::Layout, 1,
-                            CaptureFormat);
+                            CaptureFormat, false);
 }
 
 } // namespace Vulkan

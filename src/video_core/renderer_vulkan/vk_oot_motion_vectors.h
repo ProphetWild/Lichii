@@ -1,0 +1,68 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#pragma once
+
+#include <array>
+
+#include "common/common_types.h"
+#include "video_core/vulkan_common/vulkan_memory_allocator.h"
+#include "video_core/vulkan_common/vulkan_wrapper.h"
+
+namespace Vulkan {
+
+class Device;
+class Scheduler;
+
+/// Motion vectors (R16G16F, UV offsets to the previous frame) for Ocarina of Time's DLSS mode
+/// (host_shaders/oot_motion_vectors.comp): camera motion from depth and a reprojection matrix,
+/// replaced by the object motion image (vk_oot_object_motion.h) where it holds the visible
+/// fragment.
+class OotMotionVectors {
+public:
+    explicit OotMotionVectors(const Device& device, MemoryAllocator& allocator);
+    ~OotMotionVectors();
+
+    /// Records the pass; returns the motion vector image (GENERAL layout) at `size`.
+    /// `object_pixels` (two words per pixel of `size`, OotObjectMotion) may be null.
+    VkImageView Generate(Scheduler& scheduler, VkImageView depth_view, VkExtent2D size,
+                         const std::array<f32, 16>& reproject, std::array<f32, 2> jitter,
+                         bool flip_y, VkBuffer object_pixels);
+
+    [[nodiscard]] VkImage Image() const noexcept {
+        return *image;
+    }
+    [[nodiscard]] VkImageView View() const noexcept {
+        return *view;
+    }
+
+private:
+    static constexpr u32 SetCount = 4;
+
+    void CreateImage(VkExtent2D size);
+    void ReportStats();
+
+    const Device& device;
+    MemoryAllocator& allocator;
+    vk::DescriptorPool descriptor_pool;
+    vk::DescriptorSetLayout descriptor_set_layout;
+    vk::DescriptorSets descriptor_sets;
+    std::array<u64, SetCount> set_ticks{};
+    u32 next_set{};
+    vk::PipelineLayout pipeline_layout;
+    vk::ShaderModule shader;
+    vk::Pipeline pipeline;
+    vk::Sampler sampler;
+    vk::Image image;
+    vk::ImageView view;
+    VkExtent2D extent{};
+    bool image_initialized{};
+    // Bound when there is no object motion.
+    vk::Buffer dummy_pixels;
+    // EDEN_OOT_OBJECT_MOTION_STATS=1: per-pixel counts of the object motion use.
+    vk::Buffer stats;
+    std::array<u32, 11> reported{};
+    u32 generated{};
+};
+
+} // namespace Vulkan

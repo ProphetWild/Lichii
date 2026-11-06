@@ -30,6 +30,7 @@
 #include "video_core/texture_cache/conversion.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/texture_cache_base.h"
+#include "video_core/oot_dlss.h"
 #include "video_core/texture_cache/util.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_profile.h"
@@ -1366,6 +1367,99 @@ bool TextureCache<P>::TemporalUpscale(const Tegra::Engines::Fermi2D::Surface& ds
 }
 
 template <class P>
+bool TextureCache<P>::OotDlss(const Tegra::Engines::Fermi2D::Surface& dst,
+                              const Tegra::Engines::Fermi2D::Surface& src,
+                              const Tegra::Texture::TICEntry& depth, std::array<f32, 2> jitter,
+                              const std::array<f32, 16>& reproject, bool flip_y, bool reset) {
+    if constexpr (FRAMEBUFFER_BLITS ||
+                  !requires(Runtime& r, Framebuffer* f, ImageView& v) {
+                      r.OotDlss(f, v, v, std::array<u32, 2>{}, jitter, reproject, flip_y, reset);
+                  }) {
+        return false;
+    } else {
+        const Tegra::Engines::Fermi2D::Config copy{
+            .operation = Tegra::Engines::Fermi2D::Operation::SrcCopy,
+            .filter = Tegra::Engines::Fermi2D::Filter::Point,
+            .must_accelerate = true,
+            .dst_x0 = 0,
+            .dst_y0 = 0,
+            .dst_x1 = static_cast<s32>(dst.width),
+            .dst_y1 = static_cast<s32>(dst.height),
+            .src_x0 = 0,
+            .src_y0 = 0,
+            .src_x1 = static_cast<s32>(src.width),
+            .src_y1 = static_cast<s32>(src.height),
+        };
+        const auto result = GetBlitImages(dst, src, copy);
+        if (!result) {
+            return false;
+        }
+        has_deleted_images = false;
+        const ImageId depth_id =
+            FindOrInsertImage(ImageInfo(depth), depth.Address(), RelaxedOptions{});
+        if (has_deleted_images || !depth_id) {
+            return false;
+        }
+        const ImageId dst_id = result->dst_id;
+        const ImageId src_id = result->src_id;
+        PrepareImage(src_id, false, false);
+        PrepareImage(depth_id, false, false);
+        PrepareImage(dst_id, true, false);
+        if (slot_images[depth_id].info.format != PixelFormat::D32_FLOAT ||
+            slot_images[depth_id].info.num_samples != 1 ||
+            slot_images[src_id].info.num_samples != 1 ||
+            slot_images[dst_id].info.num_samples != 1) {
+            return false;
+        }
+        const auto rescaled = [&](ImageId id) {
+            return True(slot_images[id].flags & ImageFlagBits::Rescaled);
+        };
+        // DLSS reads colour and depth texel for texel: same scale (the output may differ).
+        if (rescaled(src_id) != rescaled(depth_id)) {
+            return false;
+        }
+        const Extent3D src_size = slot_images[src_id].info.size;
+        const Extent3D depth_size = slot_images[depth_id].info.size;
+        if (src_size.width != depth_size.width || src_size.height != depth_size.height) {
+            return false;
+        }
+        const std::array<u32, 2> render_size =
+            rescaled(src_id)
+                ? std::array{Settings::values.resolution_info.ScaleUp(src_size.width),
+                             Settings::values.resolution_info.ScaleUp(src_size.height)}
+                : std::array{src_size.width, src_size.height};
+        const auto view = [&](ImageId id, const Tegra::Engines::Fermi2D::Surface& surface,
+                              PixelFormat format)
+            -> std::optional<std::pair<FramebufferId, ImageViewId>> {
+            const std::optional base = slot_images[id].TryFindBase(surface.Address());
+            if (!base) {
+                return std::nullopt;
+            }
+            const SubresourceRange range{.base = *base, .extent = {1, 1}};
+            return RenderTargetFromImage(id, ImageViewInfo(ImageViewType::e2D, format, range));
+        };
+        const auto src_view = view(src_id, src, result->src_format);
+        const auto dst_view = view(dst_id, dst, result->dst_format);
+        if (!src_view || !dst_view) {
+            return false;
+        }
+        ImageViewId depth_view{};
+        if (const std::optional base = slot_images[depth_id].TryFindBase(depth.Address())) {
+            const SubresourceRange range{.base = *base, .extent = {1, 1}};
+            depth_view = FindOrEmplaceImageView(
+                depth_id, ImageViewInfo(ImageViewType::e2D, PixelFormat::D32_FLOAT, range));
+        }
+        if (!depth_view) {
+            return false;
+        }
+        Framebuffer* const dst_framebuffer = &slot_framebuffers[dst_view->first];
+        return runtime.OotDlss(dst_framebuffer, slot_image_views[src_view->second],
+                               slot_image_views[depth_view], render_size, jitter, reproject,
+                               flip_y, reset);
+    }
+}
+
+template <class P>
 std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImageView(
     const Tegra::FramebufferConfig& config, DAddr cpu_addr) {
     // TODO: Properly implement this
@@ -1379,6 +1473,10 @@ std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImage
             return PixelFormat::R5G6B5_UNORM;
         case Service::android::PixelFormat::Bgra8888:
             return PixelFormat::B8G8R8A8_UNORM;
+        case Service::android::PixelFormat::Rgba1010102:
+            return PixelFormat::A2B10G10R10_UNORM;
+        case Service::android::PixelFormat::RgbaFp16:
+            return PixelFormat::R16G16B16A16_FLOAT;
         default:
             return PixelFormat::A8B8G8R8_UNORM;
         }
@@ -2215,8 +2313,26 @@ bool TextureCache<P>::ImageCanRescale(ImageBase& image) {
     if (!image.info.rescaleable) {
         return false;
     }
+    if (OotDlss::OutputOnlyRescale() && !OotDlss::IsOutputImage(image.gpu_addr, image.info.format,
+                                                               image.info.size.width)) {
+        // Ocarina of Time DLSS Quality: the 3D stays at 2560x1440, DLSS upscales into the
+        // rescaled output.
+        return false;
+    }
     if (Settings::values.resolution_info.downscale && !image.info.downscaleable) {
         return false;
+    }
+    {
+        // A scaled copy past 2^28 texels is never backed (the Vulkan allocator gives it an
+        // unbacked sparse image that samples as zero): Ocarina of Time's 12288x12288 D16 sun
+        // shadow map at 1.5x lost all sunlight. Keep such images at 1x.
+        const auto& res = Settings::values.resolution_info;
+        const u64 scaled_texels = u64{res.ScaleUp(image.info.size.width)} *
+                                  res.ScaleUp(image.info.size.height) *
+                                  (std::max)(image.info.resources.layers, 1);
+        if (scaled_texels > (u64{1} << 28)) {
+            return false;
+        }
     }
     if (True(image.flags & (ImageFlagBits::Rescaled | ImageFlagBits::CheckingRescalable))) {
         return true;

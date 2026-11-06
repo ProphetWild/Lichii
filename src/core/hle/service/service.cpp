@@ -27,6 +27,9 @@
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/service.h"
+#include <chrono>
+
+#include "common/hle_request_stats.h"
 #include "core/hle/service/nx2_stub_interface.h"
 #include "core/hle/service/sm/sm.h"
 #include "core/reporter.h"
@@ -196,7 +199,17 @@ void ServiceFrameworkBase::InvokeRequest(HLERequestContext& ctx) {
     if (ipc_trace) {
         LOG_INFO(Service, "ipc {}::{} ({})", service_name, ctx.GetCommand(), info->name);
     }
-    handler_invoker(this, info->handler_callback, ctx);
+    if (Common::HleRequestStats::Enabled()) {
+        const auto start = std::chrono::steady_clock::now();
+        handler_invoker(this, info->handler_callback, ctx);
+        Common::g_hle_request_stats.Note(
+            static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 std::chrono::steady_clock::now() - start)
+                                 .count()),
+            service_name, info->name, ctx.GetCommand());
+    } else {
+        handler_invoker(this, info->handler_callback, ctx);
+    }
     if (ipc_trace) {
         // Response layout: [0..1] header, then 'SFCO', version, result.
         const auto* cmd_buf = ctx.CommandBuffer();
@@ -225,7 +238,17 @@ void ServiceFrameworkBase::InvokeRequestTipc(HLERequestContext& ctx) {
         LOG_INFO(Service, "tipc {}::{} ({}) [2]={:#x} [3]={:#x} [4]={:#x}", service_name,
                  ctx.GetCommand(), info->name, w[2], w[3], w[4]);
     }
-    handler_invoker(this, info->handler_callback, ctx);
+    if (Common::HleRequestStats::Enabled()) {
+        const auto start = std::chrono::steady_clock::now();
+        handler_invoker(this, info->handler_callback, ctx);
+        Common::g_hle_request_stats.Note(
+            static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 std::chrono::steady_clock::now() - start)
+                                 .count()),
+            service_name, info->name, ctx.GetCommand());
+    } else {
+        handler_invoker(this, info->handler_callback, ctx);
+    }
 }
 
 namespace {

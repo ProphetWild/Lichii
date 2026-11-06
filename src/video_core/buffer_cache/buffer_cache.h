@@ -283,8 +283,11 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
                                            device_addr_end_aligned - device_addr_start_aligned);
     // A preflushable mark persists and downloads later GPU writes at every fence. Native titles
     // instead keep read traps and flush on demand.
-    const bool preflush = !Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
+    bool preflush = !Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
     if (!area->preemtive) {
+        if (!preflush && device_addr_end_aligned - device_addr_start_aligned == Core::DEVICE_PAGESIZE) {
+            preflush = Nx2HotReadPage(device_addr_start_aligned);
+        }
         if (Nx2DownloadTrace::g_enabled) [[unlikely]] {
             Nx2DownloadTrace::Marked(device_addr_start_aligned,
                                      device_addr_end_aligned - device_addr_start_aligned, preflush);

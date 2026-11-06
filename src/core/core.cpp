@@ -73,6 +73,7 @@
 #include "network/network.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/renderer_base.h"
+#include "video_core/oot_dlss.h"
 #include "video_core/video_core.h"
 
 namespace Core {
@@ -384,6 +385,22 @@ struct System::Impl {
             Settings::values.memory_layout_mode.SetValue(Settings::MemoryLayout::Memory_12Gb);
         }
 
+        // EDEN_HDR_OUTPUT=1/0 overrides the HDR setting for this run only (test launches), as a
+        // per-game value so the saved configuration is untouched.
+        if (const char* hdr_env = std::getenv("EDEN_HDR_OUTPUT"); hdr_env && *hdr_env) {
+            Settings::values.hdr.SetGlobal(false);
+            Settings::values.hdr.SetValue(hdr_env[0] == '1');
+        }
+        // EDEN_RES_SETUP=<ResolutionSetup index> (3 = 1x, 5 = 1.5x, 6 = 2x) likewise, for A/B runs.
+        if (const char* res_env = std::getenv("EDEN_RES_SETUP"); res_env && *res_env) {
+            const auto index = std::strtoul(res_env, nullptr, 10);
+            if (index <= static_cast<unsigned long>(Settings::ResolutionSetup::Res8X)) {
+                Settings::values.resolution_setup.SetGlobal(false);
+                Settings::values.resolution_setup.SetValue(
+                    static_cast<Settings::ResolutionSetup>(index));
+            }
+        }
+
         // The Switch 2 counter runs at 31.25 MHz and its SDK converts ticks with that constant
         // (nn::os::GetSystemTickFrequency, TickManager::ConvertToTimeSpan/ConvertToTick). At 19.2 MHz
         // every tick-based time in the game was off by 1.63x: elapsed times read short and a frame
@@ -434,6 +451,19 @@ struct System::Impl {
 
         // Expose program id to dump sites and other global readers.
         Settings::SetCurrentProgramID(params.program_id);
+
+        // Ocarina of Time with NVIDIA DLSS outputs 4K: the game's 2560x1440 at 1.5x (only the
+        // output side when DLSS upscales from 1440p, see video_core/oot_dlss.h). Per-game value,
+        // so the saved configuration is untouched; EDEN_RES_SETUP still wins.
+        if (params.program_id == VideoCommon::OotDlss::ProgramId &&
+            VideoCommon::OotDlss::Requested() && std::getenv("EDEN_RES_SETUP") == nullptr) {
+            LOG_INFO(Core, "Ocarina of Time DLSS: 4K output ({}), resolution scale 1.5x",
+                     VideoCommon::OotDlss::Output() == Settings::OotDlssOutput::Dlaa4k
+                         ? "DLAA"
+                         : "Quality from 2560x1440");
+            Settings::values.resolution_setup.SetGlobal(false);
+            Settings::values.resolution_setup.SetValue(Settings::ResolutionSetup::Res3_2X);
+        }
 
         // Track launch time for frontend launches
         LaunchTimestampCache::SaveLaunchTimestamp(params.program_id);

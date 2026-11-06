@@ -14,6 +14,7 @@
 #include <vector>
 #include <array>
 
+#include "common/guest_wait_profile.h"
 #include "common/assert.h"
 #include "common/bit_util.h"
 #include "common/common_funcs.h"
@@ -1346,6 +1347,7 @@ namespace Kernel {
         ASSERT(!KScheduler::IsSchedulerLockedByCurrentThread(kernel));
         ASSERT(this == GetCurrentThreadPointer(kernel));
         ASSERT(timeout > 0);
+        Common::GuestWaitProfile::Scope wait_profile{true, this->GetThreadId(), Common::GuestWaitProfile::Kind::Sleep};
 
         ThreadQueueImplForKThreadSleep wait_queue(kernel);
         KHardwareTimer* timer{};

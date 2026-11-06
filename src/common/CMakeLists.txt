@@ -126,6 +126,8 @@ add_library(
     swap.h
     thread.cpp
     thread.h
+    guest_core_clock.cpp
+    guest_core_clock.h
     thread_cpu_clock.cpp
     thread_cpu_clock.h
     adpf.cpp

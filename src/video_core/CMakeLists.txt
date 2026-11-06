@@ -116,6 +116,7 @@ add_library(video_core STATIC
     nx2_cmdpage_diag.h
     nx2_debug_control.cpp
     nx2_debug_control.h
+    oot_dlss.h
     nx2_profile.h
     nx2_perf.h
     nx2_download_trace.h
@@ -205,6 +206,10 @@ add_library(video_core STATIC
     renderer_vulkan/vk_multi_range_buffer.h
     renderer_vulkan/vk_master_semaphore.cpp
     renderer_vulkan/vk_master_semaphore.h
+    renderer_vulkan/vk_oot_motion_vectors.cpp
+    renderer_vulkan/vk_oot_object_motion.cpp
+    renderer_vulkan/vk_oot_object_motion.h
+    renderer_vulkan/vk_oot_motion_vectors.h
     renderer_vulkan/vk_pipeline_cache.cpp
     renderer_vulkan/vk_pipeline_cache.h
     renderer_vulkan/vk_present_manager.cpp

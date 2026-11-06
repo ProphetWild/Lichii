@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #ifdef _MSC_VER
 #include <intrin.h>
 #elif defined(ARCHITECTURE_x86_64)
@@ -12,14 +13,20 @@
 #endif
 #include <chrono>
 #include <cstdlib>
+#include <functional>
+#include <utility>
 #include <string>
 #include <unordered_set>
 
+#include "common/guest_wait_profile.h"
 #include "common/common_types.h"
 #include "video_core/gpu_split.h"
 #include "common/logging.h"
 #include "common/cpu_features.h"
 #include "common/thread_cpu_clock.h"
+#include "dynarmic/interface/jit_stats.h"
+#include "common/guest_core_clock.h"
+#include "common/hle_request_stats.h"
 
 // EDEN_NX2_GPU_PROFILE: time where the GPU thread spends its time. Each zone counts its own
 // (exclusive) time, nested zones excluded; every 10 s the thread logs each zone's share.
@@ -310,6 +317,155 @@ inline void Report(const char* thread_name = "GPU thread") {
     data.window_start = now;
     data.window_start_ticks = now_ticks;
     data.cpu_start_ns = cpu_now;
+}
+
+/// The GPU (front) thread's zone totals, published for FrameMark on the presenting thread.
+inline std::array<std::atomic<u64>, static_cast<size_t>(Zone::Count)> g_front_zones{};
+
+/// Called by the GPU thread at each loop turn while EDEN_NX2_HITCH_LOG is on.
+inline void PublishFrontZones() {
+    static const bool enabled = std::getenv("EDEN_NX2_HITCH_LOG") != nullptr;
+    if (!enabled || !Enabled()) {
+        return;
+    }
+    const auto& zones = t_data.exclusive_ns;
+    for (size_t i = 0; i < zones.size(); ++i) {
+        g_front_zones[i].store(zones[i], std::memory_order_relaxed);
+    }
+}
+
+/// What the present path spent on one frame (RendererVulkan::Composite), for FrameMark.
+struct PresentTimes {
+    double acquire_ms;
+    double record_submit_ms;
+    double present_ms;
+};
+
+/// EDEN_NX2_HITCH_LOG=1 (with EDEN_NX2_GPU_PROFILE=1): called once per presented frame on the
+/// presenting thread. A frame much longer than the recent median logs where this thread's time
+/// went during it (its zones) and what the present path took, and a summary every 600 frames.
+inline void FrameMark(const PresentTimes& present) {
+    static const bool enabled = std::getenv("EDEN_NX2_HITCH_LOG") != nullptr;
+    if (!enabled || !Enabled()) {
+        return;
+    }
+    struct State {
+        std::array<u64, static_cast<size_t>(Zone::Count)> zones{};
+        std::array<u64, static_cast<size_t>(Zone::Count)> front_zones{};
+        std::array<double, 120> intervals{};
+        std::uint64_t jit_blocks{};
+        std::uint64_t jit_ns{};
+        std::uint64_t jit_flushes{};
+        std::uint64_t guest_cycles{};
+        std::array<double, 600> guest_busy{};
+        u64 frame{};
+        u64 last_ns{};
+        u64 last_ticks{};
+        u32 hitches{};
+        double worst_ms{};
+    };
+    static thread_local State state;
+    const u64 now_ns = Now();
+    const u64 now_ticks = Ticks();
+    // What the guest threads blocked on during this frame (EDEN_NX2_WAIT_PROFILE).
+    const std::string guest_waits = Common::GuestWaitProfile::Enabled()
+                                        ? " | guest threads (ms):" +
+                                              Common::GuestWaitProfile::TakeFrame(8)
+                                        : std::string{};
+    auto& data = t_data;
+    const auto previous_zones = state.zones;
+    state.zones = data.exclusive_ns;
+    const auto previous_front = state.front_zones;
+    for (size_t i = 0; i < state.front_zones.size(); ++i) {
+        state.front_zones[i] = g_front_zones[i].load(std::memory_order_relaxed);
+    }
+    // Guest CPU JIT work since the last frame (all cores).
+    const auto& jit = Dynarmic::g_jit_stats;
+    const u64 jit_blocks = jit.compiled_blocks.load(std::memory_order_relaxed);
+    const u64 jit_ns = jit.compile_ns.load(std::memory_order_relaxed);
+    const u64 jit_flushes = jit.cache_flushes.load(std::memory_order_relaxed);
+    const u64 frame_jit_blocks = jit_blocks - std::exchange(state.jit_blocks, jit_blocks);
+    const double frame_jit_ms =
+        static_cast<double>(jit_ns - std::exchange(state.jit_ns, jit_ns)) / 1e6;
+    const u64 frame_jit_flushes = jit_flushes - std::exchange(state.jit_flushes, jit_flushes);
+    const auto [hle_ns, hle_slowest] = Common::g_hle_request_stats.Take();
+    const u64 guest_cycles = Common::GuestCoreClock::TotalCycles();
+    const u64 frame_guest_cycles = guest_cycles - std::exchange(state.guest_cycles, guest_cycles);
+    if (state.last_ns == 0) {
+        state.last_ns = now_ns;
+        state.last_ticks = now_ticks;
+        return;
+    }
+    const double interval_ms = static_cast<double>(now_ns - state.last_ns) / 1e6;
+    const double ns_per_tick = static_cast<double>(now_ns - state.last_ns) /
+                               static_cast<double>((std::max<u64>)(now_ticks - state.last_ticks, 1));
+    state.last_ns = now_ns;
+    state.last_ticks = now_ticks;
+    auto sorted = state.intervals;
+    const size_t filled = (std::min<u64>)(state.frame, sorted.size());
+    std::sort(sorted.begin(), sorted.begin() + filled);
+    const double median = filled != 0 ? sorted[filled / 2] : interval_ms;
+    state.intervals[state.frame % state.intervals.size()] = interval_ms;
+    const double guest_busy_ms = static_cast<double>(frame_guest_cycles) * ns_per_tick / 1e6;
+    state.guest_busy[state.frame % state.guest_busy.size()] = guest_busy_ms;
+    ++state.frame;
+    if (filled == sorted.size() && interval_ms > (std::max)(median * 1.6, median + 6.0)) {
+        ++state.hitches;
+        state.worst_ms = (std::max)(state.worst_ms, interval_ms);
+        std::array<std::pair<double, size_t>, static_cast<size_t>(Zone::Count)> spent{};
+        for (size_t i = 0; i < spent.size(); ++i) {
+            const u64 delta = state.zones[i] - previous_zones[i];
+            spent[i] = {static_cast<double>(delta) * ns_per_tick / 1e6, i};
+        }
+        std::sort(spent.begin(), spent.end(), std::greater<>{});
+        std::string zones;
+        for (size_t i = 0; i < 6 && spent[i].first >= 0.5; ++i) {
+            zones += fmt::format(" {} {:.1f}", zone_names[spent[i].second], spent[i].first);
+        }
+        // The GPU thread's zones (with a split, the front): waits on the back are "split
+        // drain", waits for the guest's next command lists "idle"/"resume pending".
+        std::array<std::pair<double, size_t>, static_cast<size_t>(Zone::Count)> front{};
+        for (size_t i = 0; i < front.size(); ++i) {
+            const u64 delta = state.front_zones[i] - previous_front[i];
+            front[i] = {static_cast<double>(delta) * ns_per_tick / 1e6, i};
+        }
+        std::sort(front.begin(), front.end(), std::greater<>{});
+        std::string front_zones;
+        for (size_t i = 0; i < 5 && front[i].first >= 0.5; ++i) {
+            front_zones += fmt::format(" {} {:.1f}", zone_names[front[i].second], front[i].first);
+        }
+        LOG_INFO(HW_GPU,
+                 "Hitch: frame {} took {:.1f} ms (median {:.1f}) | {} zones (ms):{} | GPU thread "
+                 "zones (ms):{} | acquire "
+                 "{:.1f} record/submit {:.1f} present {:.1f} | guest JIT {} blocks {:.1f} ms{} | "
+                 "services {:.1f} ms, slowest {}::{} ({}) {:.1f} ms | guest cores busy {:.1f} ms"
+                 "{}",
+                 state.frame, interval_ms, median,
+                 GpuSplit::OnBackThread() ? "back thread" : "GPU thread",
+                 zones.empty() ? " none over 0.5" : zones,
+                 front_zones.empty() ? " none over 0.5" : front_zones, present.acquire_ms,
+                 present.record_submit_ms, present.present_ms, frame_jit_blocks, frame_jit_ms,
+                 frame_jit_flushes != 0 ? fmt::format(", {} cache flushes", frame_jit_flushes)
+                                        : std::string{},
+                 static_cast<double>(hle_ns) / 1e6,
+                 hle_slowest.service ? hle_slowest.service : "-", hle_slowest.command,
+                 hle_slowest.function ? hle_slowest.function : "-",
+                 static_cast<double>(hle_slowest.ns) / 1e6,
+                 static_cast<double>(frame_guest_cycles) * ns_per_tick / 1e6, guest_waits);
+    } else if (!guest_waits.empty() && state.frame % 300 == 0) {
+        LOG_INFO(HW_GPU, "Frame {} took {:.1f} ms (a normal frame){}", state.frame, interval_ms,
+                 guest_waits);
+    }
+    if (state.frame % 600 == 0) {
+        auto busy = state.guest_busy;
+        std::nth_element(busy.begin(), busy.begin() + busy.size() / 2, busy.end());
+        LOG_INFO(HW_GPU,
+                 "Hitches in the last 600 frames: {} (worst {:.1f} ms, median {:.1f} ms); guest "
+                 "cores busy per frame: median {:.1f} ms",
+                 state.hitches, state.worst_ms, median, busy[busy.size() / 2]);
+        state.hitches = 0;
+        state.worst_ms = 0;
+    }
 }
 
 } // namespace VideoCommon::Nx2Profile

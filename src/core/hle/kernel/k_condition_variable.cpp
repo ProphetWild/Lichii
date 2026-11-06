@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/guest_wait_profile.h"
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_condition_variable.h"
@@ -155,6 +156,7 @@ Result KConditionVariable::SignalToAddress(KernelCore& kernel, KProcessAddress a
 
 Result KConditionVariable::WaitForAddress(KernelCore& kernel, Handle handle, KProcessAddress addr, u32 value) {
     KThread* cur_thread = GetCurrentThreadPointer(kernel);
+    Common::GuestWaitProfile::Scope wait_profile{true, cur_thread->GetThreadId(), Common::GuestWaitProfile::Kind::Mutex};
     ThreadQueueImplForKConditionVariableWaitForAddress wait_queue(kernel);
 
     // Wait for the address.
@@ -271,6 +273,7 @@ void KConditionVariable::Signal(u64 cv_key, s32 count) {
 Result KConditionVariable::Wait(KProcessAddress addr, u64 key, u32 value, s64 timeout) {
     // Prepare to wait.
     KThread* cur_thread = GetCurrentThreadPointer(m_system.Kernel());
+    Common::GuestWaitProfile::Scope wait_profile{timeout != 0, cur_thread->GetThreadId(), Common::GuestWaitProfile::Kind::CondVar};
     KHardwareTimer* timer{};
     ThreadQueueImplForKConditionVariableWaitConditionVariable wait_queue(m_system.Kernel(),
                                                                          std::addressof(m_tree));

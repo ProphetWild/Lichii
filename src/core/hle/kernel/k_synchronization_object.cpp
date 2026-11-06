@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/guest_wait_profile.h"
 #include "common/assert.h"
 #include "common/common_types.h"
 #include "common/scratch_buffer.h"
@@ -81,6 +82,9 @@ Result KSynchronizationObject::Wait(KernelCore& kernel, s32* out_index,
 
     // Prepare for wait.
     KThread* thread = GetCurrentThreadPointer(kernel);
+    Common::GuestWaitProfile::Scope wait_profile{timeout != 0, thread->GetThreadId(), Common::GuestWaitProfile::Kind::Object,
+                                            num_objects == 1 ? objects[0]->GetTypeName()
+                                                             : "multiple"};
     KHardwareTimer* timer{};
     ThreadQueueImplForKSynchronizationObjectWait wait_queue(kernel, objects, thread_nodes.data(),
                                                             num_objects);

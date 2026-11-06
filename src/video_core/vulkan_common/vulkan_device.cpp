@@ -770,8 +770,8 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 
 #ifdef EGLANTINE_STREAMLINE
     if (streamline_extensions) {
-        streamline_attached =
-            Streamline::AttachDevice(instance, physical, *logical, graphics_family, dld);
+        streamline_attached = Streamline::AttachDevice(instance, physical, *logical, graphics_family,
+                                                       GraphicsFamilyQueueCount(), dld);
     } else if (Streamline::WantsDevice()) {
         Streamline::Stop();
     }
@@ -1870,8 +1870,27 @@ void Device::CollectToolingInfo() {
 #endif
 }
 
+u32 Device::GraphicsFamilyQueueCount() const {
+    u32 count = 1;
+#ifdef EGLANTINE_STREAMLINE
+    if (Streamline::WantsDevice()) {
+        const std::vector families = physical.GetQueueFamilyProperties();
+        const u32 available = graphics_family < families.size()
+                                  ? families[graphics_family].queueCount
+                                  : 1;
+        count = (std::min)(1 + Streamline::ExtraGraphicsFamilyQueues(), available);
+    }
+#endif
+    return count;
+}
+
 std::vector<VkDeviceQueueCreateInfo> Device::GetDeviceQueueCreateInfos() const {
     static constexpr float QUEUE_PRIORITY = 1.0f;
+    static constexpr std::array<float, 16> QUEUE_PRIORITIES{
+        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    const u32 graphics_queues = (std::min)(GraphicsFamilyQueueCount(),
+                                           static_cast<u32>(QUEUE_PRIORITIES.size()));
 
     ::Common::unordered_set<u32> unique_queue_families{graphics_family, present_family};
     std::vector<VkDeviceQueueCreateInfo> queue_cis;
@@ -1887,6 +1906,10 @@ std::vector<VkDeviceQueueCreateInfo> Device::GetDeviceQueueCreateInfos() const {
             .pQueuePriorities = nullptr,
         });
         ci.pQueuePriorities = &QUEUE_PRIORITY;
+        if (queue_family == graphics_family && graphics_queues > 1) {
+            ci.queueCount = graphics_queues;
+            ci.pQueuePriorities = QUEUE_PRIORITIES.data();
+        }
     }
 
     return queue_cis;

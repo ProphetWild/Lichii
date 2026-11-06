@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <optional>
@@ -49,7 +50,22 @@ struct State {
     std::vector<std::string> device_extensions;
     bool started{};
     bool attached{};
+    /// Frame generation was asked for and its plugin loaded.
+    bool frame_generation{};
+    /// ...and Streamline took the device for it.
+    bool frame_generation_attached{};
+    u32 fg_graphics_queues{};
+    u32 fg_compute_queues{};
+    /// Presenting thread only.
+    sl::DLSSGMode fg_mode = sl::DLSSGMode::eOff;
+    u32 fg_frames{};
+    u32 fg_frames_max{};
+    bool fg_mode_set{};
+    u64 fg_presents{};
 };
+
+/// The frame DLSS last upscaled, for the next composition (~0u: none since the last one).
+std::atomic<u32> g_upscaled_frame{~0u};
 
 State& GetState() {
     static State state;
@@ -212,7 +228,8 @@ bool Load(State& state, const std::filesystem::path& path) {
         Resolve(m, "slSetConstants", api.set_constants) &&
         Resolve(m, "slEvaluateFeature", api.evaluate_feature) &&
         Resolve(m, "slFreeResources", api.free_resources) &&
-        Resolve(m, "slSetVulkanInfo", api.set_vulkan_info)) {
+        Resolve(m, "slSetVulkanInfo", api.set_vulkan_info) &&
+        Resolve(m, "slSetTagForFrame", api.set_tag_for_frame)) {
         return true;
     }
     FreeLibrary(state.module);
@@ -332,7 +349,11 @@ bool Start() {
     // Streamline's plugins come from the loader's folder or the NVIDIA app's downloads (OTA); the
     // DLSS model from the loader's folder, else the NVIDIA app's copy.
     const wchar_t* plugin_paths[] = {state.plugin_dir.c_str(), state.model_dir.c_str()};
-    const sl::Feature features[] = {sl::kFeatureDLSS};
+    // PCL (latency markers) loads by default; frame generation also needs Reflex.
+    const bool want_fg = Settings::values.nvidia_dlss_frame_generation.GetValue();
+    const sl::Feature features_dlss[] = {sl::kFeatureDLSS};
+    const sl::Feature features_fg[] = {sl::kFeatureDLSS, sl::kFeatureDLSS_G,
+                                       sl::kFeatureReflex};
     sl::Preferences preferences{};
     preferences.logLevel = LogLevel() >= 2 ? sl::LogLevel::eVerbose : sl::LogLevel::eDefault;
     preferences.logMessageCallback = LogFromStreamline;
@@ -341,8 +362,13 @@ bool Start() {
     preferences.flags = sl::PreferenceFlags::eDisableCLStateTracking |
                         sl::PreferenceFlags::eUseManualHooking | sl::PreferenceFlags::eAllowOTA |
                         sl::PreferenceFlags::eLoadDownloadedPlugins;
-    preferences.featuresToLoad = features;
-    preferences.numFeaturesToLoad = 1;
+    if (want_fg) {
+        // Frame generation's inputs are tagged per frame (slSetTagForFrame).
+        preferences.flags |= sl::PreferenceFlags::eUseFrameBasedResourceTagging;
+    }
+    preferences.featuresToLoad = want_fg ? features_fg : features_dlss;
+    preferences.numFeaturesToLoad =
+        static_cast<uint32_t>(want_fg ? std::size(features_fg) : std::size(features_dlss));
     preferences.engine = sl::EngineType::eCustom;
     preferences.engineVersion = "1.0";
     preferences.projectId = PROJECT_ID;
@@ -380,6 +406,44 @@ bool Start() {
         device_extensions.end()) {
         std::erase(state.device_extensions, VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
     }
+    state.frame_generation = false;
+    if (want_fg) {
+        sl::FeatureRequirements fg{};
+        if (const sl::Result result = api.get_feature_requirements(sl::kFeatureDLSS_G, fg);
+            result != sl::Result::eOk) {
+            LOG_WARNING(Render_Vulkan,
+                        "DLSS Frame Generation is on, but Streamline found no sl.dlss_g plugin "
+                        "(result {}); it needs sl.dlss_g.dll, sl.reflex.dll, sl.pcl.dll and "
+                        "nvngx_dlssg.dll next to sl.interposer.dll",
+                        static_cast<int>(result));
+        } else {
+            state.frame_generation = true;
+            state.fg_graphics_queues = fg.vkNumGraphicsQueuesRequired;
+            state.fg_compute_queues = fg.vkNumComputeQueuesRequired;
+            const auto add = [](std::vector<std::string>& list, std::vector<std::string> names) {
+                for (std::string& name : names) {
+                    if (std::ranges::find(list, name) == list.end()) {
+                        list.push_back(std::move(name));
+                    }
+                }
+            };
+            add(state.instance_extensions,
+                Names(fg.vkNumInstanceExtensions, fg.vkInstanceExtensions));
+            add(state.device_extensions, Names(fg.vkNumDeviceExtensions, fg.vkDeviceExtensions));
+            std::string features;
+            for (const std::string& name : Names(fg.vkNumFeatures12, fg.vkFeatures12)) {
+                features += " " + name;
+            }
+            for (const std::string& name : Names(fg.vkNumFeatures13, fg.vkFeatures13)) {
+                features += " " + name;
+            }
+            LOG_INFO(Render_Vulkan,
+                     "DLSS Frame Generation wants {} graphics and {} compute queues and {} optical "
+                     "flow queues (optical flow runs in interop mode); Vulkan features:{}",
+                     fg.vkNumGraphicsQueuesRequired, fg.vkNumComputeQueuesRequired,
+                     fg.vkNumOpticalFlowQueuesRequired, features.empty() ? " none" : features);
+        }
+    }
     sl::FeatureVersion version{};
     api.get_feature_version(sl::kFeatureDLSS, version);
     LOG_INFO(Render_Vulkan, "NVIDIA Streamline {} started from {} (DLSS {})",
@@ -405,11 +469,33 @@ std::vector<std::string> DeviceExtensions() {
     return state.started ? state.device_extensions : std::vector<std::string>{};
 }
 
+PFN_vkVoidFunction Proxy(const char* name) {
+    const State& state = GetState();
+    if (!IsFrameGenerationAvailable() || !state.module) {
+        return nullptr;
+    }
+    return reinterpret_cast<PFN_vkVoidFunction>(GetProcAddress(state.module, name));
+}
+
+u32 ExtraGraphicsFamilyQueues() {
+    const State& state = GetState();
+    return state.started && state.frame_generation
+               ? state.fg_graphics_queues + state.fg_compute_queues
+               : 0;
+}
+
 bool AttachDevice(VkInstance instance, VkPhysicalDevice physical, VkDevice device,
-                  u32 graphics_family, vk::DeviceDispatch& dld) {
+                  u32 graphics_family, u32 graphics_queues, vk::DeviceDispatch& dld) {
     State& state = GetState();
     if (!WantsDevice()) {
         return false;
+    }
+    if (state.frame_generation && graphics_queues < 1 + ExtraGraphicsFamilyQueues()) {
+        LOG_WARNING(Render_Vulkan,
+                    "DLSS Frame Generation needs {} more queues in the graphics family; the device "
+                    "has {}. Frame generation is off",
+                    ExtraGraphicsFamilyQueues(), graphics_queues);
+        state.frame_generation = false;
     }
     sl::VulkanInfo info{};
     info.device = device;
@@ -417,6 +503,11 @@ bool AttachDevice(VkInstance instance, VkPhysicalDevice physical, VkDevice devic
     info.physicalDevice = physical;
     info.computeQueueFamily = graphics_family;
     info.graphicsQueueFamily = graphics_family;
+    // Streamline's own queues follow the host's queue 0 in the graphics family.
+    if (state.frame_generation) {
+        info.graphicsQueueIndex = 1;
+        info.computeQueueIndex = 1 + state.fg_graphics_queues;
+    }
     if (const sl::Result result = state.api.set_vulkan_info(info); result != sl::Result::eOk) {
         LOG_ERROR(Render_Vulkan, "Streamline did not take the Vulkan device (result {})",
                   static_cast<int>(result));
@@ -450,7 +541,124 @@ bool AttachDevice(VkInstance instance, VkPhysicalDevice physical, VkDevice devic
     hook(dld.vkDeviceWaitIdle, "vkDeviceWaitIdle");
     state.attached = true;
     LOG_INFO(Render_Vulkan, "NVIDIA DLSS is available through Streamline");
+    state.frame_generation_attached = false;
+    if (state.frame_generation) {
+        Api& api = state.api;
+        const auto function = [&](sl::Feature feature, const char* name, auto& target) {
+            void* pointer{};
+            if (api.get_feature_function(feature, name, pointer) != sl::Result::eOk || !pointer) {
+                LOG_WARNING(Render_Vulkan, "Streamline has no {}", name);
+                return false;
+            }
+            target = reinterpret_cast<std::remove_reference_t<decltype(target)>>(pointer);
+            return true;
+        };
+        if (const sl::Result result = api.is_feature_supported(sl::kFeatureDLSS_G, adapter);
+            result != sl::Result::eOk) {
+            LOG_WARNING(Render_Vulkan,
+                        "DLSS Frame Generation is not supported here (Streamline result {}); it "
+                        "needs a GeForce RTX 40 series or newer and hardware-accelerated GPU "
+                        "scheduling",
+                        static_cast<int>(result));
+        } else if (function(sl::kFeatureDLSS_G, "slDLSSGSetOptions", api.dlssg_set_options) &&
+                   function(sl::kFeatureDLSS_G, "slDLSSGGetState", api.dlssg_get_state) &&
+                   function(sl::kFeatureReflex, "slReflexSetOptions", api.reflex_set_options) &&
+                   function(sl::kFeaturePCL, "slPCLSetMarker", api.pcl_set_marker)) {
+            sl::ReflexOptions reflex{};
+            reflex.mode = sl::ReflexMode::eLowLatency;
+            if (const sl::Result result = api.reflex_set_options(reflex);
+                result != sl::Result::eOk) {
+                LOG_WARNING(Render_Vulkan, "Reflex options failed (Streamline result {})",
+                            static_cast<int>(result));
+            }
+            state.frame_generation_attached = true;
+            LOG_INFO(Render_Vulkan, "NVIDIA DLSS Frame Generation is available");
+        }
+    }
     return true;
+}
+
+bool IsFrameGenerationAvailable() {
+    const State& state = GetState();
+    return state.started && state.attached && state.frame_generation_attached;
+}
+
+void NoteUpscaledFrame(u32 index) {
+    g_upscaled_frame.store(index, std::memory_order_release);
+}
+
+std::optional<u32> TakeUpscaledFrame() {
+    const u32 index = g_upscaled_frame.exchange(~0u, std::memory_order_acq_rel);
+    return index == ~0u ? std::nullopt : std::optional<u32>{index};
+}
+
+void BeginPresent(std::optional<u32> frame) {
+    State& state = GetState();
+    if (!IsFrameGenerationAvailable()) {
+        return;
+    }
+    const Api& api = state.api;
+    // Frames DLSS did not upscale (menus, loading, videos) have no inputs to generate from.
+    const sl::DLSSGMode mode = frame ? sl::DLSSGMode::eOn : sl::DLSSGMode::eOff;
+    // The multiplier setting (2x: one generated frame), EDEN_NX2_DLSSG_FRAMES=<generated> for
+    // development, within what DLSS-G reports it can generate here.
+    u32 frames = static_cast<u32>(Settings::values.dlss_frame_generation_multiplier.GetValue()) + 1;
+    if (const char* const value = std::getenv("EDEN_NX2_DLSSG_FRAMES")) {
+        frames = static_cast<u32>(std::clamp(std::atoi(value), 1, 3));
+    }
+    if (state.fg_frames_max == 0) {
+        sl::DLSSGState fg_state{};
+        if (api.dlssg_get_state(sl::ViewportHandle{0u}, fg_state, nullptr) == sl::Result::eOk &&
+            fg_state.numFramesToGenerateMax != 0) {
+            state.fg_frames_max = fg_state.numFramesToGenerateMax;
+            LOG_INFO(Render_Vulkan, "DLSS Frame Generation can generate up to {} frames",
+                     state.fg_frames_max);
+        }
+    }
+    if (state.fg_frames_max != 0) {
+        frames = (std::min)(frames, state.fg_frames_max);
+    }
+    if (!state.fg_mode_set || mode != state.fg_mode || frames != state.fg_frames) {
+        state.fg_frames = frames;
+        sl::DLSSGOptions options{};
+        options.mode = mode;
+        options.numFramesToGenerate = frames;
+        options.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
+        const sl::Result result = api.dlssg_set_options(sl::ViewportHandle{0u}, options);
+        LOG_INFO(Render_Vulkan, "DLSS Frame Generation {} ({} generated per frame; result {})",
+                 mode == sl::DLSSGMode::eOn ? "on" : "off", options.numFramesToGenerate,
+                 static_cast<int>(result));
+        state.fg_mode = mode;
+        state.fg_mode_set = true;
+    }
+    if (frame) {
+        sl::FrameToken* token{};
+        if (api.get_new_frame_token(token, &*frame) == sl::Result::eOk && token) {
+            api.pcl_set_marker(sl::PCLMarker::ePresentStart, *token);
+        }
+    }
+    if (++state.fg_presents % 600 == 0 && mode == sl::DLSSGMode::eOn) {
+        sl::DLSSGState fg_state{};
+        if (api.dlssg_get_state(sl::ViewportHandle{0u}, fg_state, nullptr) == sl::Result::eOk) {
+            LOG_INFO(Render_Vulkan,
+                     "DLSS Frame Generation: status {:#x}, {} frames presented per real frame, "
+                     "minimum size {}",
+                     static_cast<u32>(fg_state.status), fg_state.numFramesActuallyPresented,
+                     fg_state.minWidthOrHeight);
+        }
+    }
+}
+
+void EndPresent(std::optional<u32> frame) {
+    const State& state = GetState();
+    if (!frame || !IsFrameGenerationAvailable()) {
+        return;
+    }
+    const Api& api = state.api;
+    sl::FrameToken* token{};
+    if (api.get_new_frame_token(token, &*frame) == sl::Result::eOk && token) {
+        api.pcl_set_marker(sl::PCLMarker::ePresentEnd, *token);
+    }
 }
 
 bool IsDlssAvailable() {

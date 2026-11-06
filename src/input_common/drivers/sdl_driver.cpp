@@ -13,10 +13,13 @@
 #include "common/thread.h"
 #include "common/vector_math.h"
 #include "input_common/drivers/sdl_driver.h"
+#include "input_common/helpers/steam_controller_haptics.h"
 
 namespace InputCommon {
 
 namespace {
+constexpr Uint16 ValveVendorId = 0x28DE;
+
 Common::UUID GetGUID(SDL_Joystick* joystick) {
     const SDL_GUID guid = SDL_GetJoystickGUID(joystick);
     std::array<u8, 16> data{};
@@ -306,8 +309,40 @@ public:
     }
 
     void SetSDLJoystick(SDL_Joystick* joystick, SDL_Gamepad* controller) {
+        {
+            std::scoped_lock lock{haptics_mutex};
+            steam_haptics.reset();
+            steam_haptics_checked = false;
+        }
         sdl_joystick.reset(joystick);
         sdl_controller.reset(controller);
+    }
+
+    /// Hands the vibration to native Steam Controller haptics. False for other controllers.
+    bool PlaySteamHaptics(const Common::Input::VibrationStatus& vibration) {
+        std::scoped_lock lock{haptics_mutex};
+        CreateSteamHaptics();
+        if (!steam_haptics) {
+            return false;
+        }
+        steam_haptics->SetVibration(vibration);
+        return true;
+    }
+
+    bool HasSteamHaptics() {
+        std::scoped_lock lock{haptics_mutex};
+        CreateSteamHaptics();
+        return steam_haptics != nullptr;
+    }
+
+    /// First of the four extra axes carrying the left and right trackpad positions, or -1.
+    int GetTouchpadAxisBase() const {
+        if (!sdl_controller || SDL_GetGamepadVendor(sdl_controller.get()) != ValveVendorId ||
+            SDL_GetNumGamepadTouchpads(sdl_controller.get()) < 1) {
+            return -1;
+        }
+        return (std::max)(static_cast<int>(SDL_GAMEPAD_AXIS_COUNT),
+                          SDL_GetNumJoystickAxes(sdl_joystick.get()));
     }
 
     bool IsJoyconLeft() const {
@@ -400,10 +435,21 @@ public:
     }
 
 private:
+    void CreateSteamHaptics() {
+        if (!steam_haptics_checked && sdl_controller) {
+            steam_haptics_checked = true;
+            steam_haptics = SteamControllerHaptics::Create(sdl_controller.get());
+        }
+    }
+
     Common::UUID guid;
     int port;
     std::unique_ptr<SDL_Joystick, decltype(&SDL_CloseJoystick)> sdl_joystick;
     std::unique_ptr<SDL_Gamepad, decltype(&SDL_CloseGamepad)> sdl_controller;
+    // Declared after the gamepad so it is destroyed, and stops writing, before the gamepad closes.
+    std::unique_ptr<SteamControllerHaptics> steam_haptics;
+    std::mutex haptics_mutex;
+    bool steam_haptics_checked{false};
     mutable std::mutex mutex;
 
     u64 last_motion_update{};
@@ -521,6 +567,14 @@ void SDLDriver::InitJoystick(SDL_JoystickID joystick_id) {
 
     const auto guid = GetGUID(sdl_joystick);
 
+    if (SDL_GetJoystickVendor(sdl_joystick) == ValveVendorId) {
+        const char* name = SDL_GetJoystickName(sdl_joystick);
+        const bool native = SDL_GetJoystickGUID(sdl_joystick).data[14] == 'h';
+        LOG_INFO(Input, "Opened {} (PID {:04X}) through {}",
+                 name != nullptr ? name : "Valve controller", SDL_GetJoystickProduct(sdl_joystick),
+                 native ? "SDL HIDAPI, natively" : "the system or Steam driver");
+    }
+
     if (Settings::values.enable_joycon_driver) {
         if (guid.uuid[5] == 0x05 && guid.uuid[4] == 0x7e &&
             (guid.uuid[8] == 0x06 || guid.uuid[8] == 0x07)) {
@@ -623,6 +677,29 @@ void SDLDriver::HandleGameControllerEvent(const SDL_Event& event) {
         }
         break;
     }
+    case SDL_EVENT_GAMEPAD_TOUCHPAD_DOWN:
+    case SDL_EVENT_GAMEPAD_TOUCHPAD_MOTION:
+    case SDL_EVENT_GAMEPAD_TOUCHPAD_UP: {
+        // Steam Controller trackpads become two extra axis pairs, so they can be mapped as sticks.
+        if (event.gtouchpad.finger != 0 || event.gtouchpad.touchpad < 0 ||
+            event.gtouchpad.touchpad > 1) {
+            break;
+        }
+        const auto joystick = GetSDLJoystickByGamepadID(event.gtouchpad.which);
+        if (!joystick) {
+            break;
+        }
+        const int axis_base = joystick->GetTouchpadAxisBase();
+        if (axis_base < 0) {
+            break;
+        }
+        const bool touching = event.type != SDL_EVENT_GAMEPAD_TOUCHPAD_UP;
+        const int axis = axis_base + event.gtouchpad.touchpad * 2;
+        const PadIdentifier identifier = joystick->GetPadIdentifier();
+        SetAxis(identifier, axis, touching ? event.gtouchpad.x * 2.0f - 1.0f : 0.0f);
+        SetAxis(identifier, axis + 1, touching ? event.gtouchpad.y * 2.0f - 1.0f : 0.0f);
+        break;
+    }
     case SDL_EVENT_GAMEPAD_SENSOR_UPDATE: {
         auto joystick = GetSDLJoystickByGamepadID(event.gsensor.which);
         if (!joystick) {
@@ -675,8 +752,11 @@ SDLDriver::SDLDriver(std::string input_engine_) : InputEngine(std::move(input_en
     }
 #endif
 
-    // SDL3 defaults Steam Controller Bluetooth HIDAPI support to off, which can disable gyro.
-    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAM, "1");
+    // Drive Steam Controllers directly through SDL's HIDAPI drivers. This works without the Steam
+    // client, exposes gyro, trackpads and back buttons, and turns lizard mode off while the
+    // controller is open. Users who prefer Steam Input can turn it off.
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAM,
+                Settings::values.enable_steam_controller_driver ? "1" : "0");
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_SENSOR_FUSION, "1");
     SDL_SetHint(SDL_HINT_AUTO_UPDATE_SENSORS, "1");
 
@@ -789,6 +869,11 @@ Common::Input::DriverResult SDLDriver::SetVibration(
     const PadIdentifier& identifier, const Common::Input::VibrationStatus& vibration) {
     const auto joystick =
         GetSDLJoystickByGUID(identifier.guid.RawString(), static_cast<int>(identifier.port));
+
+    if (Settings::values.steam_controller_hd_rumble && joystick->PlaySteamHaptics(vibration)) {
+        return Common::Input::DriverResult::Success;
+    }
+
     const auto process_amplitude_exp = [](f32 amplitude, f32 factor) {
         return (amplitude + std::pow(amplitude, factor)) * 0.5f * 0xFFFF;
     };
@@ -838,6 +923,10 @@ bool SDLDriver::IsVibrationEnabled(const PadIdentifier& identifier) {
         .high_frequency = 320.0f,
         .type = Common::Input::VibrationAmplificationType::Exponential,
     };
+
+    if (Settings::values.steam_controller_hd_rumble && joystick->HasSteamHaptics()) {
+        return true;
+    }
 
     if (joystick->IsVibrationTested()) {
         return joystick->HasVibration();

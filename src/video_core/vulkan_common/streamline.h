@@ -8,6 +8,7 @@
 #pragma once
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -51,8 +52,30 @@ bool Start();
 
 /// Hands the renderer's device to Streamline and routes the swapchain calls through it, as
 /// Streamline's manual hooking needs. Stops Streamline and returns false when DLSS can't run.
+/// Streamline's proxy for a hooked Vulkan function (sl_hooks.h) once frame generation has the
+/// device, else null. Frame generation finds a swapchain's window through the surface proxies,
+/// which only work after AttachDevice.
+[[nodiscard]] PFN_vkVoidFunction Proxy(const char* name);
+
+/// Queues frame generation wants in the graphics family after the host's first one.
+[[nodiscard]] u32 ExtraGraphicsFamilyQueues();
+
+/// `graphics_queues`: how many queues the device created in `graphics_family`.
 bool AttachDevice(VkInstance instance, VkPhysicalDevice physical, VkDevice device,
-                  u32 graphics_family, vk::DeviceDispatch& dld);
+                  u32 graphics_family, u32 graphics_queues, vk::DeviceDispatch& dld);
+
+/// NVIDIA DLSS Frame Generation is on and Streamline took the device for it.
+[[nodiscard]] bool IsFrameGenerationAvailable();
+
+/// The GPU thread, as DLSS upscales a frame: its Streamline frame index. The next presented frame
+/// shows it (TakeUpscaledFrame at composition).
+void NoteUpscaledFrame(u32 index);
+[[nodiscard]] std::optional<u32> TakeUpscaledFrame();
+
+/// The presenting thread, around vkQueuePresentKHR. `frame` is the DLSS frame the image shows;
+/// frames without one are presented with frame generation off.
+void BeginPresent(std::optional<u32> frame);
+void EndPresent(std::optional<u32> frame);
 
 /// Whether DLSS can run on the attached device.
 [[nodiscard]] bool IsDlssAvailable();

@@ -93,8 +93,13 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, cpu_backend, tr("Backend:"), QString());
 
     INSERT(Settings, cpu_clock, tr("CPU Clocks"),
-           tr("Raises the clock the emulated CPU reports, which removes some FPS limiters.\n"
+           tr("Raises the emulated CPU clock. In single-core mode the CPU then gets more done per "
+              "unit of guest time; game time follows real time unless Time boost is on.\n"
               "Weaker CPUs may see reduced performance, and certain games may behave improperly."));
+    INSERT(Settings, cpu_clock_scales_time, tr("Time boost"),
+           tr("Game time also runs faster by the CPU clock's factor (1.7x on Boost, 2x on "
+              "Overclock), as CPU Clocks used to do. This lifts some frame-rate limiters that wait "
+              "on time, but games that measure time run faster than normal."));
 
     INSERT(Settings, use_custom_cpu_ticks, QString(), QString());
     INSERT(Settings, cpu_ticks, tr("Custom CPU Ticks"),
@@ -136,6 +141,23 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            "other race conditions."));
 
     // Renderer
+    INSERT(Settings, hdr, tr("HDR"),
+           tr("Enables HDR output. Requires Vulkan and an HDR-enabled display.\n"
+              "Supports native HDR10 and scRGB output; SDR content is not converted to HDR.\n"
+              "HDR uses bilinear presentation without post-processing or frame generation.\n"
+              "Takes effect when a game starts."));
+    INSERT(Settings, hdr_reference_white, tr("HDR Reference White"),
+           tr("Reference white in nits reported to the game. Default: 200 nits, matching the "
+              "observed Switch 2 HDR applet's starting value without matching saved display "
+              "calibration. Set to 0 to follow Switch 2 calibration: HDR Peak Luminance divided "
+              "by 1.5, rounded up and clamped to 50-300 nits.\n"
+              "Set a nonzero value to override calibration.\n"
+              "Does not rescale the final image. Takes effect when a game starts."));
+    INSERT(Settings, hdr_peak_luminance, tr("HDR Peak Luminance"),
+           tr("Peak luminance in nits reported to the game. Default: 300 nits, matching the "
+              "observed Switch 2 HDR applet's starting value without matching saved display "
+              "calibration.\n"
+              "Does not rescale the final image. Takes effect when a game starts."));
     INSERT(Settings, renderer_backend, tr("API:"),
            tr("Changes the output graphics API.\nVulkan is recommended."));
     INSERT(Settings, vulkan_device, tr("Device:"),
@@ -155,6 +177,23 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Strength of RCAS (AMD's contrast-adaptive sharpening) on the upscaler used in place "
               "of a game's DLSS (AMD FSR 3.1); 0% turns it off.\nAlso sets the sharpening "
               "of the AMD FSR 1 and SGSR window adapting filters."));
+    INSERT(Settings, dlss_preset, tr("DLSS Preset:"),
+           tr("NVIDIA DLSS's model. Auto uses the game's choice (preset M for Ocarina of "
+              "Time). K: NVIDIA's default for Quality and DLAA. L: sharper, more stable, "
+              "costlier. M: like L, closer to K in cost.\nTakes effect when a game starts."));
+    INSERT(Settings, dlss_sharpening, tr("DLSS Sharpness:"),
+           tr("Sharpens NVIDIA DLSS's output with AMD FidelityFX RCAS (DLSS has had no "
+              "sharpening of its own since "
+              "DLSS 3.1). 0% leaves it unsharpened."));
+    INSERT(Settings, dlss_frame_generation_multiplier, tr("DLSS Frame Generation:"),
+           tr("Frames shown per rendered frame. 3x and 4x (multi frame generation) need a "
+              "GeForce RTX 50 series; the driver's limit applies."));
+    INSERT(Settings, nvidia_dlss_frame_generation, tr("NVIDIA DLSS Frame Generation (experimental)"),
+           tr("Generates a frame between each two frames NVIDIA DLSS upscaled (DLSS 3 Frame "
+              "Generation, GeForce RTX 40 series and newer).\nNeeds NVIDIA DLSS on and "
+              "Streamline's sl.dlss_g, sl.reflex and sl.pcl next to its loader, with "
+              "nvngx_dlssg.dll. Frames DLSS did not upscale (menus, loading) are shown as they "
+              "are.\nTakes effect when a game starts."));
     INSERT(Settings, nvidia_dlss, tr("Use NVIDIA DLSS in place of a game's DLSS (experimental)"),
            tr("Uses NVIDIA DLSS on GeForce RTX cards in place of a Switch 2 game's own DLSS, "
               "instead of AMD FSR 3.1.\nNeeds NVIDIA's Streamline loader, and NVIDIA DLSS unless "
@@ -165,6 +204,12 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, anti_aliasing, tr("Anti-Aliasing Method:"),
            tr("The anti-aliasing method to use.\nSMAA offers the best quality.\nFXAA "
               "can produce a more stable picture in lower resolutions."));
+    INSERT(Settings, oot_anti_aliasing, tr("Ocarina of Time anti-aliasing:"),
+           tr("Ocarina of Time only. Game: the game's own anti-aliasing network, which sharpens "
+              "heavily.\nNo sharpening: the image as the game renders it (pairs well with a higher "
+              "resolution).\nNVIDIA DLSS: NVIDIA DLSS in its place, with sub-pixel jitter and "
+              "camera motion vectors (needs \"Use NVIDIA DLSS\" on).\nTakes effect when the game "
+              "starts."));
     INSERT(Settings, post_shader_chain, QString(), QString());
     INSERT(Settings, post_shader_preset, QString(), QString());
     INSERT(Settings, post_shader_enabled, tr("Enable post-processing effects"),
@@ -397,6 +442,20 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
 
 #define PAIR(ENUM, VALUE, TRANSLATION) {static_cast<u32>(Settings::ENUM::VALUE), (TRANSLATION)}
 
+    translations->insert({Settings::EnumMetadata<Settings::DlssPreset>::Index(),
+                          {
+                              PAIR(DlssPreset, Auto, tr("Auto")),
+                              PAIR(DlssPreset, K, tr("Preset K")),
+                              PAIR(DlssPreset, L, tr("Preset L")),
+                              PAIR(DlssPreset, M, tr("Preset M")),
+                          }});
+    translations->insert({Settings::EnumMetadata<Settings::DlssFrameGeneration>::Index(),
+                          {
+                              PAIR(DlssFrameGeneration, X2, tr("2x")),
+                              PAIR(DlssFrameGeneration, X3, tr("3x")),
+                              PAIR(DlssFrameGeneration, X4, tr("4x")),
+                          }});
+
     // Intentionally skipping VSyncMode to let the UI fill that one out
     translations->insert({Settings::EnumMetadata<Settings::AppletMode>::Index(),
                           {
@@ -535,6 +594,12 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                               PAIR(AntiAliasing, None, tr("None")),
                               PAIR(AntiAliasing, Fxaa, tr("FXAA")),
                               PAIR(AntiAliasing, Smaa, tr("SMAA")),
+                          }});
+    translations->insert({Settings::EnumMetadata<Settings::OotAntiAliasing>::Index(),
+                          {
+                              PAIR(OotAntiAliasing, Game, tr("Game")),
+                              PAIR(OotAntiAliasing, NoSharpen, tr("No sharpening")),
+                              PAIR(OotAntiAliasing, NvidiaDlss, tr("NVIDIA DLSS")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::AspectRatio>::Index(),
                           {

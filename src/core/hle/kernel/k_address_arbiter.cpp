@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/guest_wait_profile.h"
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_address_arbiter.h"
@@ -251,6 +252,7 @@ Result KAddressArbiter::SignalAndModifyByWaitingCountIfEqual(uint64_t addr, s32 
 Result KAddressArbiter::WaitIfLessThan(uint64_t addr, s32 value, bool decrement, s64 timeout) {
     // Prepare to wait.
     KThread* cur_thread = GetCurrentThreadPointer(system.Kernel());
+    Common::GuestWaitProfile::Scope wait_profile{timeout != 0, cur_thread->GetThreadId(), Common::GuestWaitProfile::Kind::Arbiter};
     KHardwareTimer* timer{};
     ThreadQueueImplForKAddressArbiter wait_queue(system.Kernel(), std::addressof(m_tree));
 
@@ -306,6 +308,7 @@ Result KAddressArbiter::WaitIfLessThan(uint64_t addr, s32 value, bool decrement,
 Result KAddressArbiter::WaitIfEqual(uint64_t addr, s64 value, s64 timeout, bool is_64_bit) {
     // Prepare to wait.
     KThread* cur_thread = GetCurrentThreadPointer(system.Kernel());
+    Common::GuestWaitProfile::Scope wait_profile{timeout != 0, cur_thread->GetThreadId(), Common::GuestWaitProfile::Kind::Arbiter};
     KHardwareTimer* timer{};
     ThreadQueueImplForKAddressArbiter wait_queue(system.Kernel(), std::addressof(m_tree));
 

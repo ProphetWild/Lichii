@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <optional>
 
 #include "common/common_types.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -39,6 +40,22 @@ public:
         /// Turns a motion vector into render pixels (the render size for UV offsets).
         std::array<f32, 2> motion_vector_scale;
         bool reset;
+        /// Depth is reversed (1 near, 0 far); Ocarina of Time's is not.
+        bool depth_inverted = true;
+        /// -1: EDEN_NX2_DLSS_HDR decides; 0: colour is tonemapped LDR; 1: linear HDR.
+        int color_hdr = -1;
+        /// sl::DLSSPreset for this caller when EDEN_NX2_DLSS_PRESET is unset; -1: preset K.
+        int preset = -1;
+        /// The game's camera (OpenGL clip space, row-major, column vectors), for the constants
+        /// frame generation reads; without it they are identities.
+        struct Camera {
+            /// Previous clip from current NDC (z = depth * 2 - 1).
+            std::array<f32, 16> reproject;
+            std::array<f32, 16> view_projection;
+            /// The image's first row is NDC y = +1.
+            bool flip_y;
+        };
+        std::optional<Camera> camera;
     };
 
     /// Throws vk::Exception when Streamline has no DLSS for this device.
@@ -67,7 +84,8 @@ private:
     const Device& device;
     Scheduler& scheduler;
     MemoryAllocator& memory_allocator;
-    void* set_options{}; ///< slDLSSSetOptions
+    void* set_options{};     ///< slDLSSSetOptions
+    u32 applied_preset_value{~0u}; ///< sl::DLSSPreset last given to DLSS
     VkExtent2D render_extent{};
     VkExtent2D upscale_extent{};
     u32 frame_index{};

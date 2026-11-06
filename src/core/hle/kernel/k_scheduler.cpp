@@ -6,6 +6,7 @@
 
 #include <bit>
 
+#include "common/guest_wait_profile.h"
 #include "common/assert.h"
 #include "common/bit_util.h"
 #include "common/fiber.h"
@@ -354,6 +355,19 @@ void KScheduler::SwitchThread(KernelCore& kernel, KThread* next_thread) {
         cur_process->AddCpuTime(tick_diff);
     }
     m_last_context_switch_time = cur_tick;
+    if (Common::GuestWaitProfile::Enabled()) {
+        // Host time the outgoing thread ran on this core since the last switch.
+        static thread_local auto last_switch = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        if (cur_thread != m_idle_thread) {
+            Common::GuestWaitProfile::Add(
+                cur_thread->GetThreadId(), Common::GuestWaitProfile::Kind::Run, nullptr,
+                static_cast<u64>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(now - last_switch)
+                        .count()));
+        }
+        last_switch = now;
+    }
 
     // Update our previous thread.
     if (cur_process != nullptr) {

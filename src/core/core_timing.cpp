@@ -224,10 +224,20 @@ void CoreTiming::ResetTicks() {
 }
 
 u64 CoreTiming::GetClockTicks() const {
-    u64 fres = is_multicore ? Common::g_wall_clock.GetCNTPCT() : Common::g_wall_clock.CPUTickToGuestCNTPCT(cpu_ticks);
+    // The counter runs at the CNTFRQ_EL0 the guest reads, in real time: a faster emulated CPU
+    // finishes its work sooner but does not make time pass faster (scaling the counter sped up
+    // games that measure frame time with it, 1.7x on Boost). In single-core mode guest time
+    // comes from executed cycles, so there a faster clock means less time per cycle.
+    // Time boost (cpu_clock_scales_time) restores the old scaling on purpose.
+    u64 fres = is_multicore ? Common::g_wall_clock.GetCNTPCT()
+                            : Common::g_wall_clock.CPUTickToGuestCNTPCT(cpu_ticks);
     if (const u32 target = CpuClockTargetMhz(Settings::values.cpu_clock.GetValue());
         target != CPU_CLOCK_BASE_MHZ) {
-        fres = fres * target / CPU_CLOCK_BASE_MHZ;
+        if (Settings::values.cpu_clock_scales_time.GetValue()) {
+            fres = fres * target / CPU_CLOCK_BASE_MHZ;
+        } else if (!is_multicore) {
+            fres = fres * CPU_CLOCK_BASE_MHZ / target;
+        }
     }
     if (::Settings::values.sync_core_speed.GetValue()) {
         auto const ticks = f64(fres);

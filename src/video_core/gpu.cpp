@@ -9,8 +9,13 @@
 #include <chrono>
 #include <condition_variable>
 #include <list>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <utility>
+#include <vector>
+#include <algorithm>
+#include <cstdlib>
 
 #include "common/assert.h"
 #include "common/settings.h"
@@ -43,6 +48,57 @@
 #include "video_core/shader_notify.h"
 
 namespace Tegra {
+
+namespace {
+/// EDEN_NX2_CPU_READ_TRACE: guest CPU reads of GPU-written memory, by read, every 10 s.
+void TraceCpuRead(DAddr addr, u64 size, const VideoCore::RasterizerDownloadArea& area,
+                  std::chrono::steady_clock::duration wait) {
+    struct Entry {
+        u64 count{};
+        std::chrono::steady_clock::duration wait{};
+        std::chrono::steady_clock::duration worst{};
+        DAddr area_start{};
+        DAddr area_end{};
+    };
+    static std::mutex mutex;
+    static std::map<std::pair<DAddr, u64>, Entry> entries;
+    static auto last_report = std::chrono::steady_clock::now();
+    std::scoped_lock lock{mutex};
+    Entry& entry = entries[{addr, size}];
+    ++entry.count;
+    entry.wait += wait;
+    entry.worst = (std::max)(entry.worst, wait);
+    entry.area_start = area.start_address;
+    entry.area_end = area.end_address;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_report < std::chrono::seconds{10}) {
+        return;
+    }
+    last_report = now;
+    std::vector<std::pair<std::pair<DAddr, u64>, Entry>> sorted(entries.begin(), entries.end());
+    std::ranges::sort(sorted, [](const auto& a, const auto& b) { return a.second.wait > b.second.wait; });
+    std::chrono::steady_clock::duration total{};
+    u64 reads{};
+    for (const auto& [key, value] : sorted) {
+        total += value.wait;
+        reads += value.count;
+    }
+    const auto ms = [](std::chrono::steady_clock::duration d) {
+        return std::chrono::duration<double, std::milli>(d).count();
+    };
+    LOG_INFO(HW_GPU, "CPU reads of GPU-written memory in the last 10 s: {} reads, {:.1f} ms waited",
+             reads, ms(total));
+    for (size_t i = 0; i < (std::min)(sorted.size(), size_t{8}); ++i) {
+        const auto& [key, value] = sorted[i];
+        LOG_INFO(HW_GPU,
+                 "  read {:#x}+{} (area [{:#x}, {:#x})): {} reads, {:.1f} ms total, {:.2f} ms "
+                 "worst",
+                 key.first, key.second, value.area_start, value.area_end, value.count,
+                 ms(value.wait), ms(value.worst));
+    }
+    entries.clear();
+}
+} // Anonymous namespace
 
 struct GPU::Impl {
     explicit Impl(Core::System& system_, bool is_async_, bool use_nvdec_)
@@ -238,6 +294,10 @@ struct GPU::Impl {
                      raster_area.start_address, raster_area.end_address,
                      reads.load(std::memory_order_relaxed));
         }
+        // EDEN_NX2_CPU_READ_TRACE=1: per page, how often the guest waits here and for how long.
+        static const bool trace = std::getenv("EDEN_NX2_CPU_READ_TRACE") != nullptr;
+        const auto wait_start = trace ? std::chrono::steady_clock::now()
+                                      : std::chrono::steady_clock::time_point{};
         const u64 fence = RequestSyncOperation([this, raster_area]() {
             // Apply collected guest writes before downloading GPU data over guest memory.
             InvalidateGPUCache();
@@ -245,6 +305,10 @@ struct GPU::Impl {
         });
         gpu_thread.TickGPU(is_async);
         WaitForSyncOperation(fence);
+        if (trace) {
+            TraceCpuRead(addr, size, raster_area,
+                         std::chrono::steady_clock::now() - wait_start);
+        }
         return raster_area;
     }
 

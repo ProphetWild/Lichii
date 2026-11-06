@@ -2773,6 +2773,38 @@
                        </property>
                      </widget>
                    </item>
+                   <item row="10" column="0">
+                     <widget class="QCheckBox" name="enable_steam_controller_driver">
+                       <property name="toolTip">
+                         <string>Uses Steam Controllers without the Steam client and turns their keyboard and mouse mode off while Lichii runs. Turn this off if you use Steam Input. Requires restarting Lichii</string>
+                       </property>
+                       <property name="minimumSize">
+                         <size>
+                           <width>0</width>
+                           <height>23</height>
+                         </size>
+                       </property>
+                       <property name="text">
+                         <string>Enable direct Steam Controller driver</string>
+                       </property>
+                     </widget>
+                   </item>
+                   <item row="11" column="0">
+                     <widget class="QCheckBox" name="steam_controller_hd_rumble">
+                       <property name="toolTip">
+                         <string>On: the game's HD Rumble is translated RenHDrum-style into haptic tones with its pitch. Off: Eglantine's usual rumble (plain motor strength through SDL)</string>
+                       </property>
+                       <property name="minimumSize">
+                         <size>
+                           <width>0</width>
+                           <height>23</height>
+                         </size>
+                       </property>
+                       <property name="text">
+                         <string>Use RenHDrum rumble translation for Steam Controllers</string>
+                       </property>
+                     </widget>
+                   </item>
                  </layout>
                </widget>
              </item>

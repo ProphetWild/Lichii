@@ -12,7 +12,10 @@
 
 #include <sl.h>
 #include <sl_dlss.h>
+#include <sl_dlss_g.h>
 #include <sl_helpers_vk.h>
+#include <sl_pcl.h>
+#include <sl_reflex.h>
 
 namespace Vulkan::Streamline {
 
@@ -28,6 +31,12 @@ struct Api {
     PFun_slEvaluateFeature* evaluate_feature{};
     PFun_slFreeResources* free_resources{};
     PFun_slSetVulkanInfo* set_vulkan_info{};
+    PFun_slSetTagForFrame* set_tag_for_frame{};
+    // Frame generation's, resolved once the device is attached (null without it).
+    PFun_slDLSSGSetOptions* dlssg_set_options{};
+    PFun_slDLSSGGetState* dlssg_get_state{};
+    PFun_slReflexSetOptions* reflex_set_options{};
+    PFun_slPCLSetMarker* pcl_set_marker{};
 };
 
 /// The loaded functions; only valid while IsDlssAvailable().

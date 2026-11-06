@@ -199,6 +199,13 @@ struct BodyColorStatus {
     u32 right_grip{};
 };
 
+// Which emulated actuator a vibration comes from
+enum class VibrationSide : u8 {
+    Unknown,
+    Left,
+    Right,
+};
+
 // HD rumble data
 struct VibrationStatus {
     f32 low_amplitude{};
@@ -206,6 +213,7 @@ struct VibrationStatus {
     f32 high_amplitude{};
     f32 high_frequency{};
     VibrationAmplificationType type;
+    VibrationSide side{VibrationSide::Unknown};
 };
 
 // Physical controller LED pattern

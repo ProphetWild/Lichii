@@ -8,6 +8,9 @@
 #include "core/frontend/emu_window.h"
 #include "video_core/vulkan_common/vulkan_surface.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
+#ifdef EGLANTINE_STREAMLINE
+#include "video_core/vulkan_common/streamline.h"
+#endif
 
 namespace Vulkan {
 
@@ -22,8 +25,13 @@ vk::SurfaceKHR CreateSurface(
         const HWND hWnd = static_cast<HWND>(window_info.render_surface);
         const VkWin32SurfaceCreateInfoKHR win32_ci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
                                                    nullptr, 0, nullptr, hWnd};
-        const auto vkCreateWin32SurfaceKHR = reinterpret_cast<PFN_vkCreateWin32SurfaceKHR>(
+        auto vkCreateWin32SurfaceKHR = reinterpret_cast<PFN_vkCreateWin32SurfaceKHR>(
             dld.vkGetInstanceProcAddr(*instance, "vkCreateWin32SurfaceKHR"));
+#ifdef EGLANTINE_STREAMLINE
+        if (const PFN_vkVoidFunction proxy = Streamline::Proxy("vkCreateWin32SurfaceKHR")) {
+            vkCreateWin32SurfaceKHR = reinterpret_cast<PFN_vkCreateWin32SurfaceKHR>(proxy);
+        }
+#endif
         if (!vkCreateWin32SurfaceKHR ||
             vkCreateWin32SurfaceKHR(*instance, &win32_ci, nullptr, &unsafe_surface) != VK_SUCCESS) {
             LOG_ERROR(Render_Vulkan, "Failed to initialize Win32 surface");

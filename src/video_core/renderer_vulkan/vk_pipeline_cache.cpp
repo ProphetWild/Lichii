@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <bitset>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -29,6 +30,7 @@
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/ir_opt/passes.h"
+#include "video_core/oot_dlss.h"
 #include "shader_recompiler/program_header.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -324,6 +326,10 @@ Shader::RuntimeInfo MakeRuntimeInfo(std::span<const Shader::IR::Program> program
         break;
     }
     info.force_early_z = key.state.early_z != 0;
+    if (program.info.oot_motion.early_tests &&
+        (!info.alpha_test_func || *info.alpha_test_func == Shader::CompareFunction::Always)) {
+        info.force_early_z = true;
+    }
     info.y_negate = key.state.y_negate != 0;
     return info;
 }
@@ -1339,6 +1345,123 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                             control != nullptr ? control->invocations : 0,
                             key.state.patch_control_points_minus_one.Value() + 1, max_patch_size);
                 return nullptr;
+            }
+        }
+    }
+    // EDEN_NX2_MESH_PIPELINE_LOG=1: the shape of each task/mesh pipeline (first 64).
+    if (static const bool log_mesh = std::getenv("EDEN_NX2_MESH_PIPELINE_LOG") != nullptr;
+        log_mesh) {
+        static std::atomic<u32> logged{};
+        for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
+            const auto& program = programs[index];
+            if (key.unique_hashes[index] == 0 || !program.info.is_mesh ||
+                logged.fetch_add(1, std::memory_order_relaxed) >= 64) {
+                continue;
+            }
+            const bool has_task = std::ranges::any_of(programs, [](const auto& other) {
+                return other.info.is_task;
+            });
+            LOG_INFO(Render_Vulkan,
+                     "Mesh pipeline {:016x}: task {} mesh {:016x} fs {:016x}, {} threads, max "
+                     "{} vertices {} primitives, payload {} words, {} vertex lines, depth {} "
+                     "format {}",
+                     key.Hash(), has_task, key.unique_hashes[index], key.unique_hashes[5],
+                     program.workgroup_size[0], program.mesh.max_vertices,
+                     program.mesh.max_primitives, program.mesh.payload_words,
+                     program.mesh.vertex_lines.size(), key.state.depth_enabled.Value(),
+                     key.state.depth_format.Value());
+        }
+    }
+    // Ocarina of Time DLSS: object motion for pipelines that draw into a Z32 depth target
+    // (docs/nx2/oot-motion-vectors-plan.md): vertex + fragment, or mesh + fragment without a
+    // task stage (a task's culling would renumber the mesh workgroups). Draws of other sizes
+    // disable it.
+    if (VideoCommon::OotDlss::ObjectMotionRequested() &&
+        (program_id != 0 ? program_id : Settings::GetCurrentProgramID()) ==
+            VideoCommon::OotDlss::ProgramId &&
+        key.state.depth_enabled != 0 &&
+        key.state.depth_format == static_cast<u32>(Tegra::DepthFormat::Z32_FLOAT) &&
+        key.state.xfb_enabled == 0 && key.unique_hashes[5] != 0 &&
+        layer_source_program == nullptr && device.IsExtShaderAtomicInt64Supported() &&
+        profile.support_int64) {
+        // The one stage that makes the vertices; every other slot but the fragment's is empty.
+        size_t geometry = 0;
+        bool shape_ok = true;
+        for (size_t index = 0; index < Maxwell::MaxShaderProgram - 1; ++index) {
+            if (key.unique_hashes[index] == 0) {
+                continue;
+            }
+            const auto& info = programs[index].info;
+            const bool vertex = programs[index].stage == Shader::Stage::VertexB && !info.is_task &&
+                                !info.is_mesh;
+            // Mesh history is opt-in (EDEN_OOT_MESH_MOTION=1): Ocarina's foliage meshlets come
+            // from a list rebuilt every frame, so a workgroup's vertices change between frames
+            // (docs/nx2/oot-motion-vectors-plan.md).
+            static const bool mesh_motion = [] {
+                const char* value = std::getenv("EDEN_OOT_MESH_MOTION");
+                return value != nullptr && value[0] == '1';
+            }();
+            if (geometry == 0 && (vertex || (info.is_mesh && mesh_motion)) && !info.is_task) {
+                geometry = index;
+            } else if (!(index == 0 && uses_vertex_b)) { // VertexA merged into VertexB
+                shape_ok = false;
+            }
+        }
+        Shader::Info& fragment = programs[5].info;
+        if (shape_ok && geometry != 0 && programs[5].stage == Shader::Stage::Fragment) {
+            const Shader::IR::Program& source = programs[geometry];
+            Shader::Info& vertex = programs[geometry].info;
+            const bool mesh = vertex.is_mesh;
+            std::bitset<Shader::IR::NUM_GENERICS> used{};
+            for (u32 location = 0; location < Shader::IR::NUM_GENERICS; ++location) {
+                used[location] = vertex.stores.Generic(location);
+            }
+            if (mesh) {
+                for (const auto& lines : {source.mesh.vertex_lines, source.mesh.primitive_lines}) {
+                    for (const u32 line : lines) {
+                        const auto attribute = static_cast<Shader::IR::Attribute>(line);
+                        if (Shader::IR::IsGeneric(attribute)) {
+                            used.set(Shader::IR::GenericAttributeIndex(attribute));
+                        }
+                    }
+                }
+            }
+            std::array<u32, 2> free{};
+            u32 found{};
+            for (u32 location = Shader::IR::NUM_GENERICS; location-- > 0 && found < 2;) {
+                if (!used[location]) {
+                    free[found++] = location;
+                }
+            }
+            if (found == 2 && !vertex.uses_render_area && !fragment.uses_render_area &&
+                !fragment.stores_frag_depth && !vertex.stores.Legacy() &&
+                !fragment.loads.Legacy()) {
+                for (Shader::Info* info : {&vertex, &fragment}) {
+                    info->oot_motion.location_current = free[0];
+                    info->oot_motion.location_previous = free[1];
+                }
+                vertex.oot_motion.history = true;
+                vertex.oot_motion.mesh_max_vertices = mesh ? source.mesh.max_vertices : 0;
+                fragment.oot_motion.image = true;
+                fragment.uses_int64 = true;
+                fragment.uses_int64_bit_atomics = true;
+                const auto written = [](const auto& descriptors) {
+                    return std::ranges::any_of(descriptors,
+                                               [](const auto& desc) { return desc.is_written; });
+                };
+                fragment.oot_motion.early_tests =
+                    !fragment.uses_demote_to_helper_invocation && !fragment.stores_global_memory &&
+                    !written(fragment.storage_buffers_descriptors) &&
+                    !written(fragment.image_descriptors) &&
+                    !written(fragment.image_buffer_descriptors);
+                static std::atomic<u32> logged{};
+                if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+                    LOG_INFO(Render_Vulkan,
+                             "OoT DLSS: object motion in pipeline {}={:016x} fs={:016x} "
+                             "(varyings at {} and {})",
+                             mesh ? "mesh" : "vs", key.unique_hashes[geometry],
+                             key.unique_hashes[5], free[0], free[1]);
+                }
             }
         }
     }
