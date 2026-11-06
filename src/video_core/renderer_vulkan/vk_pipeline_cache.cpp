@@ -1373,9 +1373,16 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         }
     }
     // Ocarina of Time DLSS: object motion for pipelines that draw into a Z32 depth target
-    // (docs/nx2/oot-motion-vectors-plan.md): vertex + fragment, or mesh + fragment without a
-    // task stage (a task's culling would renumber the mesh workgroups). Draws of other sizes
-    // disable it.
+    // (docs/nx2/oot-motion-vectors-plan.md): vertex + fragment, or [task +] mesh + fragment.
+    // Mesh programs evaluate their positions again with last frame's constant buffers
+    // (OotShadowPass); EDEN_OOT_MESH_MOTION=history uses the per-vertex history instead (no task
+    // stage, since a task's culling renumbers the mesh workgroups) and =0 turns mesh motion off.
+    // Draws of other sizes disable it.
+    static const char mesh_motion = [] {
+        const char* value = std::getenv("EDEN_OOT_MESH_MOTION");
+        return value != nullptr ? value[0] : 's';
+    }();
+    const bool mesh_shadow = mesh_motion == 's';
     if (VideoCommon::OotDlss::ObjectMotionRequested() &&
         (program_id != 0 ? program_id : Settings::GetCurrentProgramID()) ==
             VideoCommon::OotDlss::ProgramId &&
@@ -1394,22 +1401,18 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             const auto& info = programs[index].info;
             const bool vertex = programs[index].stage == Shader::Stage::VertexB && !info.is_task &&
                                 !info.is_mesh;
-            // Mesh history is opt-in (EDEN_OOT_MESH_MOTION=1): Ocarina's foliage meshlets come
-            // from a list rebuilt every frame, so a workgroup's vertices change between frames
-            // (docs/nx2/oot-motion-vectors-plan.md).
-            static const bool mesh_motion = [] {
-                const char* value = std::getenv("EDEN_OOT_MESH_MOTION");
-                return value != nullptr && value[0] == '1';
-            }();
-            if (geometry == 0 && (vertex || (info.is_mesh && mesh_motion)) && !info.is_task) {
+            const bool mesh = info.is_mesh && (mesh_shadow || mesh_motion == 'h');
+            if (geometry == 0 && (vertex || mesh) && !info.is_task) {
                 geometry = index;
+            } else if (info.is_task && mesh_shadow) {
+                // The shadow evaluation does not depend on which workgroups the task launches.
             } else if (!(index == 0 && uses_vertex_b)) { // VertexA merged into VertexB
                 shape_ok = false;
             }
         }
         Shader::Info& fragment = programs[5].info;
         if (shape_ok && geometry != 0 && programs[5].stage == Shader::Stage::Fragment) {
-            const Shader::IR::Program& source = programs[geometry];
+            Shader::IR::Program& source = programs[geometry];
             Shader::Info& vertex = programs[geometry].info;
             const bool mesh = vertex.is_mesh;
             std::bitset<Shader::IR::NUM_GENERICS> used{};
@@ -1435,7 +1438,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             }
             if (found == 2 && !vertex.uses_render_area && !fragment.uses_render_area &&
                 !fragment.stores_frag_depth && !vertex.stores.Legacy() &&
-                !fragment.loads.Legacy()) {
+                !fragment.loads.Legacy() &&
+                (!mesh || !mesh_shadow || Shader::Optimization::OotShadowPass(source))) {
                 for (Shader::Info* info : {&vertex, &fragment}) {
                     info->oot_motion.location_current = free[0];
                     info->oot_motion.location_previous = free[1];
@@ -1454,13 +1458,17 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                     !written(fragment.storage_buffers_descriptors) &&
                     !written(fragment.image_descriptors) &&
                     !written(fragment.image_buffer_descriptors);
-                static std::atomic<u32> logged{};
-                if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+                static std::array<std::atomic<u32>, 2> logged{};
+                if (logged[mesh].fetch_add(1, std::memory_order_relaxed) < 8) {
                     LOG_INFO(Render_Vulkan,
                              "OoT DLSS: object motion in pipeline {}={:016x} fs={:016x} "
-                             "(varyings at {} and {})",
+                             "(varyings at {} and {}{})",
                              mesh ? "mesh" : "vs", key.unique_hashes[geometry],
-                             key.unique_hashes[5], free[0], free[1]);
+                             key.unique_hashes[5], free[0], free[1],
+                             vertex.oot_motion.shadow
+                                 ? fmt::format(", shadow of {} constant buffer words",
+                                               vertex.oot_motion.shadow_words)
+                                 : std::string{});
                 }
             }
         }

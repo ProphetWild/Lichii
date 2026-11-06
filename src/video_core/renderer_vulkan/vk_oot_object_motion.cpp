@@ -123,7 +123,8 @@ void OotObjectMotion::ClearPixels(Scheduler& scheduler) {
 }
 
 OotObjectMotion::Layout OotObjectMotion::Allocate(u64 identity, u32 range, u32 instances,
-                                                  u32 vertex_bias, u32 instance_bias) {
+                                                  u32 vertex_bias, u32 instance_bias,
+                                                  bool by_order) {
     ++stats.draws;
     drawn = true;
     u32& occurrence = occurrences[identity];
@@ -143,7 +144,8 @@ OotObjectMotion::Layout OotObjectMotion::Allocate(u64 identity, u32 range, u32 i
     current[key] = Slot{base, range, instances};
     u32 previous_base = ~0u;
     if (const auto it = previous.find(key);
-        (!repeated || KeepRepeated()) && it != previous.end() && it->second.range == range &&
+        (!repeated || by_order || KeepRepeated()) && it != previous.end() &&
+        it->second.range == range &&
         it->second.instances == instances) {
         previous_base = it->second.base;
         ++stats.matched;

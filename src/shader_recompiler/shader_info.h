@@ -367,6 +367,13 @@ struct Info {
         u32 location_current{};
         u32 location_previous{};
         u32 mesh_max_vertices{}; ///< mesh stage: vertices per workgroup (history slots)
+        /// Mesh stage (OotShadowPass): last frame's position comes from a second evaluation with
+        /// last frame's constant buffers, kept in the history buffer as `shadow_words` words:
+        /// constant buffer i at word shadow_base[i], shadow_size[i] words long.
+        bool shadow{};
+        u32 shadow_words{};
+        std::array<u32, MAX_CBUFS> shadow_base{};
+        std::array<u32, MAX_CBUFS> shadow_size{};
     } oot_motion;
 
     IR::Type used_constant_buffer_types{};

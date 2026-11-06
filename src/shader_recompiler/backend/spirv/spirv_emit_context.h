@@ -325,6 +325,12 @@ public:
         Id previous{};
         Id buffer{};         // fragment: u64 per pixel, depth bits << 32 | half2 motion
         Id buffer_element{};
+        // Mesh shadow evaluation (Info::oot_motion.shadow, OotShadowPass).
+        bool shadow{};
+        std::array<u32, Info::MAX_CBUFS> shadow_base{};
+        std::array<u32, Info::MAX_CBUFS> shadow_size{};
+        Id shadow_positions{}; // workgroup: x, y, z, w words per vertex, then one spare word
+        Id counter{};          // private loop counter
     } oot_motion;
 
     Id local_memory{};

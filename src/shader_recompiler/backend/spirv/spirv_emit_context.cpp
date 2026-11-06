@@ -1349,6 +1349,22 @@ void EmitContext::DefineOotMotion(const Info& info, u32& binding) {
             if (!Sirit::ValidId(workgroup_id)) {
                 workgroup_id = DefineInput(*this, U32[3], false, spv::BuiltIn::WorkgroupId);
             }
+            if (info.oot_motion.shadow) {
+                oot_motion.shadow = true;
+                oot_motion.shadow_base = info.oot_motion.shadow_base;
+                oot_motion.shadow_size = info.oot_motion.shadow_size;
+                oot_motion.shadow_positions = DefineVariable(
+                    *this, TypeArray(U32[1], Const(mesh_info.max_vertices * 4 + 1)), std::nullopt,
+                    spv::StorageClass::Workgroup);
+                Name(oot_motion.shadow_positions, "oot_shadow_positions");
+                oot_motion.counter =
+                    DefineVariable(*this, U32[1], std::nullopt, spv::StorageClass::Private);
+                Name(oot_motion.counter, "oot_counter");
+                if (!Sirit::ValidId(local_invocation_id)) {
+                    local_invocation_id =
+                        DefineInput(*this, U32[3], false, spv::BuiltIn::LocalInvocationId);
+                }
+            }
             ++binding;
             return;
         }

@@ -8,6 +8,8 @@
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdlib>
 
@@ -256,6 +258,194 @@ void EmitOotMotionMeshVertex(EmitContext& ctx, Id vertex) {
     ctx.OpStore(previous_pointer, ctx.OpCompositeInsert(ctx.F32[4], previous_w, previous, 3u));
     ctx.OpBranch(merge_label);
     ctx.AddLabel(merge_label);
+}
+
+namespace {
+// The history word `word` words after the slot `base` (four words per slot).
+Id OotHistoryWord(EmitContext& ctx, Id base, Id word) {
+    const Id u32_type{ctx.U32[1]};
+    const Id pointer{ctx.TypePointer(spv::StorageClass::StorageBuffer, ctx.F32[1])};
+    return ctx.OpAccessChain(
+        pointer, ctx.oot_motion.history, ctx.u32_zero_value,
+        ctx.OpIAdd(u32_type, base, ctx.OpShiftRightLogical(u32_type, word, ctx.Const(2U))),
+        ctx.OpBitwiseAnd(u32_type, word, ctx.Const(3U)));
+}
+} // Anonymous namespace
+
+// Last frame's word of a constant buffer for the shadow evaluation (OotShadowPass): from the
+// snapshot at previous_base, or this frame's when there is none.
+Id EmitOotPrevCbufU32(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset) {
+    const Id current{EmitGetCbufU32(ctx, binding, offset)};
+    if (!ctx.oot_motion.shadow || !binding.IsImmediate() ||
+        binding.U32() >= ctx.oot_motion.shadow_size.size() ||
+        ctx.oot_motion.shadow_size[binding.U32()] == 0) {
+        return current;
+    }
+    const Id u32_type{ctx.U32[1]};
+    const u32 size{ctx.oot_motion.shadow_size[binding.U32()]};
+    const Id word{offset.IsImmediate() ? ctx.Const(offset.U32() / 4)
+                                       : ctx.OpShiftRightLogical(u32_type, ctx.Def(offset),
+                                                                 ctx.Const(2U))};
+    const Id index{ctx.OpIAdd(u32_type, ctx.Const(ctx.oot_motion.shadow_base[binding.U32()]),
+                              ctx.OpUMin(u32_type, word, ctx.Const(size - 1)))};
+    const Id previous_base{OotMotionWord(ctx, offsetof(OotMotionLayout, previous_base) / 4)};
+    const Id has_previous{ctx.OpLogicalAnd(
+        ctx.U1,
+        ctx.OpLogicalAnd(ctx.U1, OotMotionEnabled(ctx),
+                         ctx.OpINotEqual(ctx.U1, previous_base, ctx.Const(~0u))),
+        ctx.OpULessThan(ctx.U1, word, ctx.Const(size)))};
+    const Id base{ctx.OpSelect(u32_type, has_previous, previous_base, ctx.u32_zero_value)};
+    const Id value{
+        ctx.OpBitcast(u32_type, ctx.OpLoad(ctx.F32[1], OotHistoryWord(ctx, base, index)))};
+    return ctx.OpSelect(u32_type, has_previous, value, current);
+}
+
+// The shadow value of an attribute write: kept when it is a vertex's position component.
+void EmitOotShadowWriteAttribute(EmitContext& ctx, Id address, Id value) {
+    if (!ctx.oot_motion.shadow || ctx.stage != Stage::Mesh) {
+        return;
+    }
+    const auto& lines{ctx.mesh_info.vertex_lines};
+    const u32 num_lines{static_cast<u32>(lines.size())};
+    if (num_lines == 0) {
+        return;
+    }
+    const Id u32_type{ctx.U32[1]};
+    const Id index{ctx.OpShiftRightLogical(u32_type, address, ctx.Const(2U))};
+    const Id group_words{ctx.Const(num_lines * 32)};
+    const Id rest{ctx.OpUMod(u32_type, index, group_words)};
+    const Id line{ctx.OpShiftRightLogical(u32_type, rest, ctx.Const(5U))};
+    const Id vertex{ctx.OpIAdd(
+        u32_type, ctx.OpIMul(u32_type, ctx.OpUDiv(u32_type, index, group_words), ctx.Const(32U)),
+        ctx.OpBitwiseAnd(u32_type, rest, ctx.Const(31U)))};
+    Id component{ctx.Const(4U)};
+    for (u32 element = 0; element < 4; ++element) {
+        const u32 attribute{static_cast<u32>(IR::Attribute::PositionX) + element};
+        const auto found{std::ranges::find(lines, attribute)};
+        if (found == lines.end()) {
+            continue;
+        }
+        const u32 position_line{static_cast<u32>(found - lines.begin())};
+        component = ctx.OpSelect(u32_type, ctx.OpIEqual(ctx.U1, line, ctx.Const(position_line)),
+                                 ctx.Const(element), component);
+    }
+    const u32 spare{ctx.mesh_info.max_vertices * 4};
+    const Id keep{ctx.OpLogicalAnd(
+        ctx.U1, ctx.OpULessThan(ctx.U1, index, ctx.Const(ctx.mesh_primitive_base)),
+        ctx.OpLogicalAnd(ctx.U1, ctx.OpULessThan(ctx.U1, component, ctx.Const(4U)),
+                         ctx.OpULessThan(ctx.U1, vertex, ctx.Const(ctx.mesh_info.max_vertices))))};
+    const Id target{ctx.OpSelect(
+        u32_type, keep,
+        ctx.OpIAdd(u32_type, ctx.OpShiftLeftLogical(u32_type, vertex, ctx.Const(2U)), component),
+        ctx.Const(spare))};
+    ctx.OpStore(ctx.OpAccessChain(ctx.mesh_shared_u32, ctx.oot_motion.shadow_positions, target),
+                value);
+}
+
+// Mesh epilogue with the shadow evaluation: workgroup 0 keeps this frame's constant buffer words
+// the shadow reads, for next frame's shadow.
+void EmitOotMotionMeshSnapshot(EmitContext& ctx) {
+    const Id u32_type{ctx.U32[1]};
+    const Id workgroup{ctx.OpLoad(ctx.U32[3], ctx.workgroup_id)};
+    const auto is_zero = [&](u32 element) {
+        return ctx.OpIEqual(ctx.U1, ctx.OpCompositeExtract(u32_type, workgroup, element),
+                            ctx.u32_zero_value);
+    };
+    const Id first{
+        ctx.OpLogicalAnd(ctx.U1, is_zero(0), ctx.OpLogicalAnd(ctx.U1, is_zero(1), is_zero(2)))};
+    const Id condition{ctx.OpLogicalAnd(ctx.U1, OotMotionEnabled(ctx), first)};
+    const Id copy_label{ctx.OpLabel()};
+    const Id done_label{ctx.OpLabel()};
+    ctx.OpSelectionMerge(done_label, spv::SelectionControlMask::MaskNone);
+    ctx.OpBranchConditional(condition, copy_label, done_label);
+    ctx.AddLabel(copy_label);
+    const Id current_base{OotMotionWord(ctx, offsetof(OotMotionLayout, current_base) / 4)};
+    const Id invocation{
+        ctx.OpCompositeExtract(u32_type, ctx.OpLoad(ctx.U32[3], ctx.local_invocation_id), 0U)};
+    const Id uniform_type{ctx.uniform_types.U32};
+    for (u32 binding = 0; binding < ctx.oot_motion.shadow_size.size(); ++binding) {
+        const u32 size{ctx.oot_motion.shadow_size[binding]};
+        if (size == 0 || !Sirit::ValidId(ctx.cbufs[binding].U32)) {
+            continue;
+        }
+        // for (i = invocation; i < size; i += threads)
+        ctx.OpStore(ctx.oot_motion.counter, invocation);
+        const Id header{ctx.OpLabel()};
+        const Id check{ctx.OpLabel()};
+        const Id body{ctx.OpLabel()};
+        const Id next{ctx.OpLabel()};
+        const Id merge{ctx.OpLabel()};
+        ctx.OpBranch(header);
+        ctx.AddLabel(header);
+        ctx.OpLoopMerge(merge, next, spv::LoopControlMask::MaskNone);
+        ctx.OpBranch(check);
+        ctx.AddLabel(check);
+        const Id i{ctx.OpLoad(u32_type, ctx.oot_motion.counter)};
+        ctx.OpBranchConditional(ctx.OpULessThan(ctx.U1, i, ctx.Const(size)), body, merge);
+        ctx.AddLabel(body);
+        const Id value{ctx.OpLoad(
+            u32_type,
+            ctx.OpAccessChain(uniform_type, ctx.cbufs[binding].U32, ctx.u32_zero_value, i))};
+        const Id word{ctx.OpIAdd(u32_type, i, ctx.Const(ctx.oot_motion.shadow_base[binding]))};
+        ctx.OpStore(OotHistoryWord(ctx, current_base, word), ctx.OpBitcast(ctx.F32[1], value));
+        ctx.OpBranch(next);
+        ctx.AddLabel(next);
+        ctx.OpStore(ctx.oot_motion.counter, ctx.OpIAdd(u32_type, i, ctx.Const(ctx.mesh_threads)));
+        ctx.OpBranch(header);
+        ctx.AddLabel(merge);
+    }
+    ctx.OpBranch(done_label);
+    ctx.AddLabel(done_label);
+}
+
+// As EmitOotMotionMeshVertex, with the shadow evaluation's position as last frame's.
+void EmitOotMotionMeshShadowVertex(EmitContext& ctx, Id vertex) {
+    const Id u32_type{ctx.U32[1]};
+    const Id vec4_output{ctx.TypePointer(spv::StorageClass::Output, ctx.F32[4])};
+    const Id position{
+        ctx.OpLoad(ctx.F32[4], ctx.OpAccessChain(vec4_output, ctx.output_position, vertex))};
+    ctx.OpStore(ctx.OpAccessChain(vec4_output, ctx.oot_motion.current, vertex), position);
+    const Id first{ctx.OpShiftLeftLogical(u32_type, vertex, ctx.Const(2U))};
+    std::array<Id, 4> components;
+    for (u32 element = 0; element < 4; ++element) {
+        components[element] = ctx.OpBitcast(
+            ctx.F32[1],
+            ctx.OpLoad(u32_type,
+                       ctx.OpAccessChain(ctx.mesh_shared_u32, ctx.oot_motion.shadow_positions,
+                                         ctx.OpIAdd(u32_type, first, ctx.Const(element)))));
+    }
+    const Id previous_base{OotMotionWord(ctx, offsetof(OotMotionLayout, previous_base) / 4)};
+    // Snapshots of repeated draws are matched by draw order: a shadow position more than 0.1
+    // (NDC) from the current one is taken for another draw's and dropped.
+    const auto ndc = [&](Id x, Id y, Id w) {
+        return ctx.OpFDiv(ctx.F32[2], ctx.OpCompositeConstruct(ctx.F32[2], x, y),
+                          ctx.OpCompositeConstruct(ctx.F32[2], w, w));
+    };
+    const Id current_ndc{ndc(ctx.OpCompositeExtract(ctx.F32[1], position, 0U),
+                             ctx.OpCompositeExtract(ctx.F32[1], position, 1U),
+                             ctx.OpCompositeExtract(ctx.F32[1], position, 3U))};
+    const Id previous_ndc{ndc(components[0], components[1], components[3])};
+    const Id distance{ctx.OpFSub(ctx.F32[2], previous_ndc, current_ndc)};
+    const Id limit{ctx.Const(0.1f)};
+    const Id near{ctx.OpLogicalAnd(
+        ctx.U1,
+        ctx.OpFOrdLessThan(ctx.U1, ctx.OpFAbs(ctx.F32[1], ctx.OpCompositeExtract(ctx.F32[1],
+                                                                                 distance, 0U)),
+                           limit),
+        ctx.OpFOrdLessThan(ctx.U1, ctx.OpFAbs(ctx.F32[1], ctx.OpCompositeExtract(ctx.F32[1],
+                                                                                 distance, 1U)),
+                           limit))};
+    const Id has_previous{ctx.OpLogicalAnd(
+        ctx.U1,
+        ctx.OpLogicalAnd(ctx.U1, OotMotionEnabled(ctx),
+                         ctx.OpINotEqual(ctx.U1, previous_base, ctx.Const(~0u))),
+        ctx.OpLogicalAnd(ctx.U1, near,
+                         ctx.OpFOrdGreaterThan(ctx.U1, components[3], ctx.f32_zero_value)))};
+    // w = 0: no previous position (the combine pass then keeps the camera's motion).
+    const Id previous_w{ctx.OpSelect(ctx.F32[1], has_previous, components[3], ctx.f32_zero_value)};
+    const Id previous{ctx.OpCompositeConstruct(ctx.F32[4], components[0], components[1],
+                                               components[2], previous_w)};
+    ctx.OpStore(ctx.OpAccessChain(vec4_output, ctx.oot_motion.previous, vertex), previous);
 }
 
 namespace {

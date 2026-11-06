@@ -324,8 +324,8 @@ game's dynamic resolution.
     still camera.
   - So a workgroup draws different vertices every frame. Most likely the meshlet list is
     rebuilt by a culling pass each frame.
-  - Mesh history is therefore opt-in (`EDEN_OOT_MESH_MOTION=1`, signature selectable with
-    `EDEN_OOT_MESH_SIGNATURE=first|last`); foliage keeps camera motion.
+  - The per-vertex history is kept behind `EDEN_OOT_MESH_MOTION=history` (signature
+    selectable with `EDEN_OOT_MESH_SIGNATURE=first|last`).
 - **The sound approach: evaluate the vertex/mesh program twice.** Once as is, and once with last
   frame's constant buffers bound in place of this frame's (a recompiler pass that duplicates the
   position computation with its constant-buffer loads redirected to a second binding set). The
@@ -335,3 +335,35 @@ game's dynamic resolution.
     history (per-draw identity; static per-instance data is the same either way, and the global
     time/camera blocks are what change).
   - This would also replace the history buffer for vertex shaders.
+
+### Mesh shadow evaluation (implemented 2026-11-06)
+
+The approach above, done in the mesh stage only (default; `EDEN_OOT_MESH_MOTION=0` turns mesh
+motion off).
+
+- **Probe first.** Over 60 scene mesh programs, every position depends on constant buffers 0, 3
+  and 4 (sometimes 5 and 6) at immediate binding indices, nothing reaches an attribute write
+  through shared memory, and the dependent side effects are only branch conditions, the map
+  writes and a few storage writes.
+- **`OotShadowPass`** (`ir_opt/oot_shadow_pass.cpp`, run by the pipeline cache):
+  - clones the pure instructions (and phis) that depend on immediate constant buffer reads;
+  - turns the clones' reads into `OotPrevCbufU32` (last frame's word);
+  - adds an `OotShadowWriteAttribute` twin to every attribute write.
+  The shadow follows this frame's control flow; memory loads read this frame's data.
+- **SPIR-V.**
+  - Shadow position components go to a workgroup array.
+  - In the epilogue, workgroup 0 copies the constant buffer words the shadow reads into the
+    history buffer (four words per slot), and each vertex passes its position plus the shadow's.
+  - `OotPrevCbufU32` reads the snapshot at `previous_base`, or this frame's word when there is
+    none.
+- **Matching.**
+  - Constant buffers are ring-allocated, so their addresses change every frame and cannot
+    identify a draw (0 matches).
+  - Repeated draws of the same mesh are matched by draw order: 94% of scene mesh draws find a
+    snapshot (30% without repeats).
+  - A shadow position more than 0.1 NDC from the current one is dropped, so a mismatched pair
+    falls back to camera motion.
+- Task stages are allowed: nothing depends on the workgroup numbering any more.
+- **Results (Kokiri Forest, still camera, motion debug view).** Canopy, trees and mid-ground
+  plants switch from camera to object motion with near-zero vectors, and foliage renders
+  unchanged. Not yet checked by eye: DLSS foliage stability and FG artifacts while moving.

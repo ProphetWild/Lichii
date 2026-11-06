@@ -146,11 +146,20 @@ void MeshEpilogue(EmitContext& ctx) {
             copy();
         }
     }
+    if (Sirit::ValidId(ctx.oot_motion.history) && ctx.oot_motion.shadow) {
+        EmitOotMotionMeshSnapshot(ctx);
+    }
     if (Sirit::ValidId(ctx.oot_motion.history)) {
         // Same vertices per invocation as the copy, so each reads the position it wrote.
         for (u32 first = 0; first < mesh.max_vertices; first += threads) {
             const Id vertex{ctx.OpIAdd(ctx.U32[1], invocation, ctx.Const(first))};
-            const auto motion = [&] { EmitOotMotionMeshVertex(ctx, vertex); };
+            const auto motion = [&] {
+                if (ctx.oot_motion.shadow) {
+                    EmitOotMotionMeshShadowVertex(ctx, vertex);
+                } else {
+                    EmitOotMotionMeshVertex(ctx, vertex);
+                }
+            };
             if (first + threads > mesh.max_vertices) {
                 If(ctx, ctx.OpULessThan(ctx.U1, vertex, max_vertices), motion);
             } else {

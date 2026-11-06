@@ -33,8 +33,10 @@ public:
     void EnsureImage(Scheduler& scheduler, VkExtent2D size);
 
     /// Slots for one draw: `range` vertices per instance after subtracting the biases.
+    /// `by_order`: a draw repeated within a frame takes the history of last frame's draw at the
+    /// same position in the order (else none).
     [[nodiscard]] Layout Allocate(u64 identity, u32 range, u32 instances, u32 vertex_bias,
-                                  u32 instance_bias);
+                                  u32 instance_bias, bool by_order = false);
 
     /// Called once per presented frame: swaps the history halves and orders this frame's history
     /// writes before the next frame's reads.

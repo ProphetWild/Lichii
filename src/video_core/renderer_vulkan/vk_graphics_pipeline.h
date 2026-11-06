@@ -123,6 +123,17 @@ public:
                                    [](const auto& info) { return info.oot_motion.history; });
     }
 
+    /// Words of last frame's constant buffers the mesh stage's shadow evaluation reads (OoT
+    /// object motion, OotShadowPass), else 0.
+    [[nodiscard]] u32 OotMeshShadowWords() const noexcept {
+        for (const auto& info : stage_infos) {
+            if (info.oot_motion.history && info.oot_motion.shadow) {
+                return info.oot_motion.shadow_words;
+            }
+        }
+        return 0;
+    }
+
     /// The mesh stage's vertices per workgroup when it keeps OoT object motion history, else 0.
     [[nodiscard]] u32 OotMeshMaxVertices() const noexcept {
         for (const auto& info : stage_infos) {

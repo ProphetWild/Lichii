@@ -25,6 +25,7 @@
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
 
 #include "common/assert.h"
+#include "common/div_ceil.h"
 #include "common/dkb_frame_trace.h"
 #include "shader_recompiler/exception.h"
 #include "common/logging.h"
@@ -2742,7 +2743,17 @@ void RasterizerVulkan::PushOotObjectMotion(u32 base_vertex, u32 num_vertices, u3
             identity ^= identity >> 31;
         }
         constexpr u32 MaxWorkgroups = 1u << 16;
-        if (num_vertices != 0 && num_vertices <= MaxWorkgroups) {
+        if (const u32 words = pipeline->OotMeshShadowWords(); words != 0) {
+            // Snapshot of the constant buffer words its shadow evaluation reads, four per slot:
+            // this frame's for the next, last frame's for this one. A mesh drawn several times a
+            // frame (its constant buffers move every frame) takes last frame's snapshot at the
+            // same place in the draw order; the mesh stage drops shadow positions far from the
+            // current ones.
+            data = oot_object_motion->Allocate(identity, Common::DivCeil(words, 4u), 1, 0, 0,
+                                               true);
+            data.vertex_range = num_vertices;
+            data.image_width = size.width;
+        } else if (num_vertices != 0 && num_vertices <= MaxWorkgroups) {
             // Two history entries per vertex (position, signature: EmitOotMotionMeshVertex).
             data = oot_object_motion->Allocate(identity, mesh_vertices * 2, num_vertices, 0, 0);
             data.vertex_range = num_vertices;
