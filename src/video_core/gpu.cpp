@@ -165,10 +165,19 @@ struct GPU::Impl {
 
     /// Synchronizes CPU writes with Host GPU memory.
     void InvalidateGPUCache() {
-        std::function<void(PAddr, size_t)> callback_writes([this](PAddr address, size_t size) {
-            renderer->ReadRasterizer()->OnCacheInvalidation(address, size);
+        // Gathered first so the rasterizer takes each cache's lock once, not once per range: the
+        // CPU's write traps hold them too.
+        static thread_local std::vector<std::pair<PAddr, size_t>> ranges;
+        ranges.clear();
+        std::function<void(PAddr, size_t)> callback_writes([](PAddr address, size_t size) {
+            if (address != 0 && size != 0) {
+                ranges.emplace_back(address, size);
+            }
         });
         system.GatherGPUDirtyMemory(callback_writes);
+        if (!ranges.empty()) {
+            renderer->ReadRasterizer()->OnCacheInvalidations(ranges);
+        }
     }
 
     /// Signal the ending of command list.

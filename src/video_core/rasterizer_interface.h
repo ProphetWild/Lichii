@@ -161,6 +161,13 @@ public:
     /// Notify rasterizer that any caches of the specified region are desync with guest
     virtual void OnCacheInvalidation(PAddr addr, u64 size) = 0;
 
+    /// OnCacheInvalidation for each range, taking each cache's lock once.
+    virtual void OnCacheInvalidations(std::span<const std::pair<PAddr, size_t>> ranges) {
+        for (const auto& [addr, size] : ranges) {
+            OnCacheInvalidation(addr, size);
+        }
+    }
+
     virtual bool TryCacheInvalidation(DAddr addr, u64 size) {
         if (MustFlushRegion(addr, size, VideoCommon::CacheType::BufferCache)) return false;
         OnCacheInvalidation(addr, size);
