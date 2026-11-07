@@ -246,7 +246,10 @@ template<>
 
 template<std::size_t bitsize>
 const void* EmitReadMemoryMov(BlockOfCode& code, int value_idx, const Xbyak::RegExp& addr, bool ordered) {
-    if (ordered) {
+    // An x86 load is already ordered before later loads and stores (acquire), and ordered stores
+    // are xchg, which drains the store buffer: LDAR up to 64 bits is a plain mov (from Lichii
+    // #161), not a locked xadd that takes the cache line exclusively.
+    if (ordered && bitsize == 128) {
         if constexpr (bitsize != 128) {
             code.xor_(Xbyak::Reg32(value_idx), Xbyak::Reg32(value_idx));
         } else {
