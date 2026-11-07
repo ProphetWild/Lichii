@@ -61,18 +61,24 @@ inline bool OutputOnlyRescale() {
            Settings::GetCurrentProgramID() == ProgramId;
 }
 
-/// Texture LOD bias added to mipmapped samplers while DLSS upscales the 3D: textures are then
-/// sampled for the output resolution, not the render resolution (NVIDIA's DLSS guide, 3.5). The
-/// game's own bias stays under it. Quality output: log2(2560 / 3840). EDEN_OOT_LOD_BIAS=<n>
-/// replaces it (0: off).
+/// Texture LOD bias added to mipmapped samplers under DLSS, NVIDIA's log2(render / display) - 1
+/// (DLSS Programming Guide 3.5): the jittered frames DLSS accumulates resolve more texture detail
+/// than one frame at the render size. Quality: -1.585; DLAA: -1. The game's own bias stays
+/// under it. EDEN_OOT_LOD_BIAS=<n> replaces it in either mode (0: off).
 inline float UpscaleLodBias() {
-    static const float bias = [] {
+    if (!Requested() || Settings::GetCurrentProgramID() != ProgramId) {
+        return 0.0f;
+    }
+    static const std::optional<float> override_bias = []() -> std::optional<float> {
         if (const char* value = std::getenv("EDEN_OOT_LOD_BIAS")) {
             return static_cast<float>(std::strtod(value, nullptr));
         }
-        return std::log2(1.0f / 1.5f);
+        return std::nullopt;
     }();
-    return OutputOnlyRescale() ? bias : 0.0f;
+    if (override_bias) {
+        return *override_bias;
+    }
+    return (OutputOnlyRescale() ? std::log2(1.0f / 1.5f) : 0.0f) - 1.0f;
 }
 
 /// The 3D's images are rescaled (DLAA at 4K).
