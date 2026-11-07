@@ -2565,7 +2565,75 @@ void RasterizerVulkan::CaptureOotCamera() {
         camera.moving = false;
         camera.searched = 0;
     }
-    if (camera.moving || camera.searched >= 64) {
+    if (camera.moving) {
+        return;
+    }
+    static std::pair<u32, u32> logged_offsets{~0u, ~0u};
+    // Takes `current` and `previous` (in c[index] at those offsets) as the camera when they are
+    // close and invertible. True when they differ (the search for this frame is over).
+    const auto take = [&](u32 index, u32 current_offset, u32 previous_offset, const float* current,
+                          const float* previous) {
+        float difference = 0.0f, magnitude = 0.0f;
+        for (int i = 0; i < 16; ++i) {
+            difference += std::abs(current[i] - previous[i]);
+            magnitude += std::abs(current[i]);
+        }
+        if (difference > 0.3f * magnitude || (camera.valid && difference == 0.0f)) {
+            return false;
+        }
+        std::array<float, 16> view_projection{};
+        std::array<float, 16> previous_view_projection{};
+        std::copy_n(current, 16, view_projection.begin());
+        std::copy_n(previous, 16, previous_view_projection.begin());
+        const auto inverse = Inverse(view_projection);
+        if (!inverse) {
+            return false;
+        }
+        const auto reproject = Multiply(previous_view_projection, *inverse);
+        if (!std::ranges::all_of(reproject, [](float v) { return std::isfinite(v); })) {
+            return false;
+        }
+        camera.reproject = reproject;
+        camera.view_projection = view_projection;
+        camera.valid = true;
+        camera.moving = difference > 0.0f;
+        if (camera.moving) {
+            camera.known_index = index;
+            camera.known_current = current_offset;
+            camera.known_previous = previous_offset;
+        }
+        const std::pair offsets{index << 16 | current_offset, previous_offset};
+        static u32 changes{};
+        if (offsets != logged_offsets && changes < 32) {
+            logged_offsets = offsets;
+            ++changes;
+            LOG_INFO(Render_Vulkan,
+                     "OoT DLSS camera: c[{}] view-projection at {:#x}, previous at {:#x} ({})",
+                     index, current_offset, previous_offset,
+                     camera.moving ? "differ" : "identical");
+        }
+        return camera.moving;
+    };
+    // Where a pair that differs was last found: checked on every scene draw, since only some
+    // shaders bind it (c[7]) and others hold this frame's matrix twice (c[3]), which on a pan
+    // would leave most frames without camera motion.
+    if (camera.known_index != ~0u) {
+        const auto& cbuf = maxwell3d->state.shader_stages[0].const_buffers[camera.known_index];
+        const u32 end = (std::max)(camera.known_current, camera.known_previous) + 64;
+        if (cbuf.enabled && cbuf.size >= end &&
+            gpu_memory->IsFullyMappedRange(cbuf.address, end)) {
+            std::array<float, 16> current{};
+            std::array<float, 16> previous{};
+            gpu_memory->ReadBlockUnsafe(cbuf.address + camera.known_current, current.data(), 64);
+            gpu_memory->ReadBlockUnsafe(cbuf.address + camera.known_previous, previous.data(), 64);
+            if (IsPerspective(current.data()) && IsPerspective(previous.data()) &&
+                take(camera.known_index, camera.known_current, camera.known_previous,
+                     current.data(), previous.data())) {
+                return;
+            }
+        }
+    }
+    if (camera.searched >= 64) {
         return;
     }
     ++camera.searched;
@@ -2576,7 +2644,6 @@ void RasterizerVulkan::CaptureOotCamera() {
     // a still camera, an identical pair is right).
     constexpr u32 MaxBytes = 0x800;
     std::array<float, MaxBytes / 4> words{};
-    static std::pair<u32, u32> logged_offsets{~0u, ~0u};
     for (u32 slot = 0; slot < Tegra::Engines::Maxwell3D::Regs::MaxConstBuffers; ++slot) {
         const u32 index = slot == 0 ? 3 : (slot == 3 ? 0 : slot);
         const auto& cbuf = maxwell3d->state.shader_stages[0].const_buffers[index];
@@ -2598,42 +2665,7 @@ void RasterizerVulkan::CaptureOotCamera() {
                 if (candidates[b] < candidates[a] + 64) {
                     continue; // overlapping rows of one matrix
                 }
-                float difference = 0.0f, magnitude = 0.0f;
-                for (int i = 0; i < 16; ++i) {
-                    difference += std::abs(current[i] - previous[i]);
-                    magnitude += std::abs(current[i]);
-                }
-                if (difference > 0.3f * magnitude || (camera.valid && difference == 0.0f)) {
-                    continue;
-                }
-                std::array<float, 16> view_projection{};
-                std::array<float, 16> previous_view_projection{};
-                std::copy_n(current, 16, view_projection.begin());
-                std::copy_n(previous, 16, previous_view_projection.begin());
-                const auto inverse = Inverse(view_projection);
-                if (!inverse) {
-                    continue;
-                }
-                const auto reproject = Multiply(previous_view_projection, *inverse);
-                if (!std::ranges::all_of(reproject, [](float v) { return std::isfinite(v); })) {
-                    continue;
-                }
-                camera.reproject = reproject;
-                camera.view_projection = view_projection;
-                camera.valid = true;
-                camera.moving = difference > 0.0f;
-                const std::pair offsets{index << 16 | candidates[a], candidates[b]};
-                static u32 changes{};
-                if (offsets != logged_offsets && changes < 32) {
-                    logged_offsets = offsets;
-                    ++changes;
-                    LOG_INFO(Render_Vulkan,
-                             "OoT DLSS camera: c[{}] view-projection at {:#x}, previous at {:#x} "
-                             "({})",
-                             index, candidates[a], candidates[b],
-                             camera.moving ? "differ" : "identical");
-                }
-                if (camera.moving) {
+                if (take(index, candidates[a], candidates[b], current, previous)) {
                     return;
                 }
             }

@@ -246,6 +246,10 @@ struct Camera {
     bool valid{};
     u32 searched{}; ///< draws searched this frame
     bool moving{};  ///< found a pair that differs: no need to search further this frame
+    /// Where the last pair that differed was (constant buffer, current and previous offsets).
+    u32 known_index = ~0u;
+    u32 known_current{};
+    u32 known_previous{};
 };
 
 /// A row-major view-projection with a perspective divide: clip w is minus the view-space z

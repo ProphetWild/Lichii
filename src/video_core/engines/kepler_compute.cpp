@@ -1143,9 +1143,11 @@ bool KeplerCompute::ReplaceOotNetwork(u64 program_id, u64 native_key) {
         Camera& camera = CurrentCamera();
         std::array<float, 16> reproject{};
         bool valid = false;
+        bool moving = false;
         {
             std::scoped_lock lock{camera.mutex};
             valid = camera.valid;
+            moving = camera.moving;
             reproject = camera.reproject;
         }
         const u64 frame = FrameCounter().load(std::memory_order_relaxed);
@@ -1158,11 +1160,14 @@ bool KeplerCompute::ReplaceOotNetwork(u64 program_id, u64 native_key) {
             // A gap (menu, load, cutscene cut) starts DLSS's history again.
             // A present without a new scene (frame pacing at low frame rates) is not a gap.
             const bool reset = oot_last_dlss_frame == ~u64{0} || frame > oot_last_dlss_frame + 8;
-            static u32 resets{}, calls{};
+            static u32 resets{}, calls{}, still{};
             resets += reset ? 1 : 0;
+            still += moving ? 0 : 1;
             if (++calls % 600 == 0) {
-                LOG_INFO(HW_GPU, "OoT DLSS: {} history resets in the last 600 frames",
-                         std::exchange(resets, 0));
+                LOG_INFO(HW_GPU,
+                         "OoT DLSS: {} history resets in the last 600 frames, {} with an identical "
+                         "camera pair (no camera motion)",
+                         std::exchange(resets, 0), std::exchange(still, 0));
             }
             done = rasterizer->AccelerateOotDlss(source, destination, *depth_tic,
                                                  Jitter(scene_frame), reproject, flip_y, reset);
