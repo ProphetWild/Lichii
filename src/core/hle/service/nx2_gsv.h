@@ -1929,6 +1929,13 @@ private:
         if (forced_interval != 0) {
             swap_interval = forced_interval;
         }
+        // Ocarina of Time's 30 FPS mode: two vblanks a frame. Its frame step follows the time
+        // measured (Dynamic FPS by Dark), so it keeps full speed.
+        constexpr u64 OcarinaOfTimeId = 0x0400486024DEC000ULL;
+        if (process != nullptr && process->GetProgramId() == OcarinaOfTimeId &&
+            Settings::values.oot_30fps.GetValue()) {
+            swap_interval = (std::max)(swap_interval, 2U);
+        }
         const u32 refresh_rate = (timing & 0xffff) >= 30 && (timing & 0xffff) <= 240 ? timing & 0xffff : 60;
         if (trace) {
             m_frame_trace.interval = swap_interval;

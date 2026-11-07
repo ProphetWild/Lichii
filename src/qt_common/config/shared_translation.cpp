@@ -178,7 +178,7 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "of a game's DLSS (AMD FSR 3.1); 0% turns it off.\nAlso sets the sharpening "
               "of the AMD FSR 1 and SGSR window adapting filters."));
     INSERT(Settings, dlss_preset, tr("DLSS Preset:"),
-           tr("NVIDIA DLSS's model. Auto uses the game's choice (preset K for Ocarina of "
+           tr("NVIDIA DLSS's model. Auto uses the game's choice (preset M for Ocarina of "
               "Time). K: NVIDIA's default for Quality and DLAA. L: sharper, more stable, "
               "costlier. M: like L, closer to K in cost.\nTakes effect when a game starts."));
     INSERT(Settings, dlss_sharpening, tr("DLSS Sharpness:"),
@@ -334,6 +334,10 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, use_video_framerate, tr("Sync to framerate of video playback"),
            tr("Run the game at normal speed during video playback, even when the framerate is "
               "unlocked."));
+    INSERT(Settings, oot_30fps, tr("Ocarina of Time: 30 FPS mode"),
+           tr("Caps Ocarina of Time at an even 30 FPS for when it cannot hold 60. The game keeps "
+              "its normal speed through the Dynamic FPS by Dark add-on. Takes effect at once; the "
+              "60 FPS / 30 FPS button in the status bar switches it too."));
     INSERT(Settings, mkw_30fps, tr("Mario Kart World: 30 FPS mode"),
            tr("Forces the game to use its native 30 FPS mode at normal game speed. "
               "Takes effect after restarting the game."));
