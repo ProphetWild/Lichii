@@ -1981,7 +1981,7 @@ bool TextureCacheRuntime::UpscaleWithDlss(Framebuffer* dst_framebuffer, ImageVie
 bool TextureCacheRuntime::OotDlss(Framebuffer* dst_framebuffer, ImageView& input_color,
                                   ImageView& depth, std::array<u32, 2> render_size,
                                   std::array<f32, 2> jitter, const std::array<f32, 16>& reproject,
-                                  bool flip_y, bool reset) {
+                                  bool flip_y, bool reset, bool hdr) {
 #ifdef EGLANTINE_STREAMLINE
     if (dlss_unsupported) {
         return false;
@@ -2067,7 +2067,9 @@ bool TextureCacheRuntime::OotDlss(Framebuffer* dst_framebuffer, ImageView& input
                                     static_cast<f32>(render_size[1])},
             .reset = reset,
             .depth_inverted = false,
-            .color_hdr = 0,
+            // Before the tonemap the colour is linear HDR (auto exposure); after it, display
+            // referred.
+            .color_hdr = hdr ? 1 : 0,
             // Preset K (NVIDIA's Quality and DLAA model): 14-30% more measured detail than M in
             // 4K Quality in Kokiri Forest.
             .preset = 11, // sl::DLSSPreset::ePresetK

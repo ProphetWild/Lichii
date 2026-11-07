@@ -458,6 +458,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                 if (target != 0 && tonemapped.exchange(target, std::memory_order_relaxed) != target) {
                     LOG_INFO(Render_Vulkan, "OoT DLSS: tonemapped scene at {:#x}", target);
                 }
+                if (VideoCommon::OotDlss::HdrInput()) {
+                    OotDlssBeforeTonemap();
+                }
                 break;
             }
         }
@@ -2803,6 +2806,92 @@ void RasterizerVulkan::CaptureOotCamera() {
                 }
             }
         }
+    }
+}
+
+void RasterizerVulkan::OotDlssBeforeTonemap() {
+    using namespace VideoCommon::OotDlss;
+    using Tegra::Engines::Fermi2D;
+    auto& targets = Targets();
+    const u64 scene_frame = SceneFrame().load(std::memory_order_relaxed);
+    if (targets.hdr_frame.load(std::memory_order_relaxed) == scene_frame) {
+        return;
+    }
+    const u64 colour = targets.color_gpu.load(std::memory_order_relaxed);
+    std::optional<Tegra::Texture::TICEntry> depth_tic;
+    std::optional<Tegra::Texture::TICEntry> output_tic;
+    {
+        std::scoped_lock lock{targets.depth_mutex};
+        depth_tic = targets.depth_tic;
+        output_tic = targets.output_tic;
+    }
+    std::array<float, 16> reproject{};
+    bool valid{};
+    {
+        Camera& camera = CurrentCamera();
+        std::scoped_lock lock{camera.mutex};
+        valid = camera.valid;
+        reproject = camera.reproject;
+    }
+    if (colour == 0 || !depth_tic || !output_tic || !valid) {
+        return;
+    }
+    // The scene colour has the network output's size, format and layout.
+    const auto surface = [&](u64 address) {
+        Fermi2D::Surface result{};
+        result.format = Tegra::RenderTargetFormat::B10G11R11_FLOAT;
+        result.linear = Fermi2D::MemoryLayout::BlockLinear;
+        result.block_width.Assign(output_tic->block_width);
+        result.block_height.Assign(output_tic->block_height);
+        result.block_depth.Assign(output_tic->block_depth);
+        result.depth = 1;
+        result.width = output_tic->Width();
+        result.height = output_tic->Height();
+        result.addr_upper = static_cast<u32>(address >> 32);
+        result.addr_lower = static_cast<u32>(address);
+        return result;
+    };
+    const Fermi2D::Surface output = surface(output_tic->Address());
+    const Fermi2D::Surface scene = surface(colour);
+    const s32 width = static_cast<s32>(output_tic->Width());
+    const s32 height = static_cast<s32>(output_tic->Height());
+    const Fermi2D::Config copy{
+        .operation = Fermi2D::Operation::SrcCopy,
+        .filter = Fermi2D::Filter::Point,
+        .must_accelerate = true,
+        .dst_x0 = 0,
+        .dst_y0 = 0,
+        .dst_x1 = width,
+        .dst_y1 = height,
+        .src_x0 = 0,
+        .src_y0 = 0,
+        .src_x1 = width,
+        .src_y1 = height,
+    };
+    std::scoped_lock lock{texture_cache.mutex};
+    // DLSS writes the network output's image (free until the network pass), then that goes
+    // back over the scene colour the tonemap reads.
+    if (!texture_cache.OotDlss(output, scene, *depth_tic, Jitter(scene_frame), reproject, FlipY(),
+                               HistoryReset(), true)) {
+        static u32 failures{};
+        if (failures++ < 3) {
+            LOG_WARNING(Render_Vulkan, "OoT DLSS: HDR evaluation unavailable this frame");
+        }
+        return;
+    }
+    // Marked even if the copy back fails: the network pass must not evaluate DLSS twice.
+    targets.hdr_frame.store(scene_frame, std::memory_order_relaxed);
+    if (!texture_cache.BlitImage(scene, output, copy)) {
+        static u32 failures{};
+        if (failures++ < 3) {
+            LOG_WARNING(Render_Vulkan, "OoT DLSS: HDR result not copied to the scene colour");
+        }
+        return;
+    }
+    static bool logged{};
+    if (!std::exchange(logged, true)) {
+        LOG_INFO(Render_Vulkan, "OoT DLSS: running on the HDR scene colour {:#x} before the tonemap",
+                 colour);
     }
 }
 

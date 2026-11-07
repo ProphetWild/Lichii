@@ -86,6 +86,19 @@ inline bool SceneRescaled() {
     return Settings::values.resolution_info.active && !OutputOnlyRescale();
 }
 
+/// DLSS on the linear HDR scene colour right before the tonemap pass, as NVIDIA recommends, in
+/// place of the tonemapped image at the game's network: the tonemap, bloom and HUD then work on
+/// DLSS's result. DLAA only (Quality would need the tonemap pass at the output size).
+/// EDEN_OOT_DLSS_HDR=0 keeps DLSS after the tonemap.
+inline bool HdrInput() {
+    static const bool disabled = [] {
+        const char* value = std::getenv("EDEN_OOT_DLSS_HDR");
+        return value != nullptr && value[0] == '0';
+    }();
+    return !disabled && Requested() && !OutputOnlyRescale() &&
+           Settings::GetCurrentProgramID() == ProgramId;
+}
+
 /// Per-object motion vectors for DLSS (on by default with DLSS; EDEN_OOT_OBJECT_MOTION=0 turns
 /// them off). Pipelines built while it is off keep camera motion only.
 inline bool ObjectMotionRequested() {
@@ -141,7 +154,18 @@ struct SceneTargets {
     std::atomic<u32> depth_height{};
     std::mutex depth_mutex;
     std::optional<Tegra::Texture::TICEntry> depth_tic; ///< guarded by depth_mutex
+    /// The network output's descriptor (guarded by depth_mutex): the scene colour and the
+    /// tonemapped image share its size, format and layout.
+    std::optional<Tegra::Texture::TICEntry> output_tic;
+    /// Scene frame whose DLSS ran before the tonemap (HdrInput): its network pass only copies.
+    std::atomic<u64> hdr_frame{~u64{0}};
 };
+
+/// Frame counter of the last DLSS evaluation, for HistoryReset.
+inline std::atomic<u64>& LastDlssFrame() {
+    static std::atomic<u64> frame{~u64{0}};
+    return frame;
+}
 
 inline SceneTargets& Targets() {
     static SceneTargets targets;
@@ -298,6 +322,23 @@ inline Camera& CurrentCamera() {
 inline std::atomic<u64>& FrameCounter() {
     static std::atomic<u64> frame{};
     return frame;
+}
+
+/// EDEN_OOT_DLSS_FLIP_Y=1: the motion vectors' y the other way round (diagnosis).
+inline bool FlipY() {
+    static const bool flip = [] {
+        const char* value = std::getenv("EDEN_OOT_DLSS_FLIP_Y");
+        return value != nullptr && value[0] == '1';
+    }();
+    return flip;
+}
+
+/// Whether this evaluation starts DLSS's history again: a gap (menu, load, cutscene cut). A
+/// present without a new scene (frame pacing at low frame rates) is not a gap.
+inline bool HistoryReset() {
+    const u64 frame = FrameCounter().load(std::memory_order_relaxed);
+    const u64 last = LastDlssFrame().exchange(frame, std::memory_order_relaxed);
+    return last == ~u64{0} || frame > last + 8;
 }
 
 /// Scene frame: advanced in the GPU command stream right after the network output pass (where

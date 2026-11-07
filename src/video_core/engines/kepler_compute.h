@@ -263,7 +263,6 @@ public:
     /// Ocarina of Time DLSS / no-sharpen modes: true when this network dispatch is replaced (the
     /// output pass is replaced by DLSS or a copy of the tonemapped image).
     bool ReplaceOotNetwork(u64 program_id, u64 native_key);
-    u64 oot_last_dlss_frame = ~u64{0};
     /// GPU address of the image a cb0 texture handle at `offset` points to, or 0.
     u64 HandleImageAddress(u32 offset);
 

@@ -1455,7 +1455,8 @@ template <class P>
 bool TextureCache<P>::OotDlss(const Tegra::Engines::Fermi2D::Surface& dst,
                               const Tegra::Engines::Fermi2D::Surface& src,
                               const Tegra::Texture::TICEntry& depth, std::array<f32, 2> jitter,
-                              const std::array<f32, 16>& reproject, bool flip_y, bool reset) {
+                              const std::array<f32, 16>& reproject, bool flip_y, bool reset,
+                              bool hdr) {
     if constexpr (FRAMEBUFFER_BLITS ||
                   !requires(Runtime& r, Framebuffer* f, ImageView& v) {
                       r.OotDlss(f, v, v, std::array<u32, 2>{}, jitter, reproject, flip_y, reset);
@@ -1540,7 +1541,7 @@ bool TextureCache<P>::OotDlss(const Tegra::Engines::Fermi2D::Surface& dst,
         Framebuffer* const dst_framebuffer = &slot_framebuffers[dst_view->first];
         if (!runtime.OotDlss(dst_framebuffer, slot_image_views[src_view->second],
                              slot_image_views[depth_view], render_size, jitter, reproject, flip_y,
-                             reset)) {
+                             reset, hdr)) {
             return false;
         }
         Image& dst_image = slot_images[dst_id];

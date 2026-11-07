@@ -1139,14 +1139,18 @@ bool KeplerCompute::ReplaceOotNetwork(u64 program_id, u64 native_key) {
     {
         std::scoped_lock lock{Targets().depth_mutex};
         depth_tic = Targets().depth_tic;
+        Targets().output_tic = output;
     }
+    // DLSS already ran on the HDR scene colour before the tonemap: copy the tonemapped image.
+    const bool hdr_done = Targets().hdr_frame.load(std::memory_order_relaxed) ==
+                          SceneFrame().load(std::memory_order_relaxed);
     if (Requested() && !depth_tic) {
         static u32 explained{};
         if (explained++ < 3) {
             LOG_INFO(HW_GPU, "OoT DLSS: waiting for the depth descriptor");
         }
     }
-    if (Requested() && depth_tic) {
+    if (Requested() && depth_tic && !hdr_done) {
         Camera& camera = CurrentCamera();
         std::array<float, 16> reproject{};
         bool valid = false;
@@ -1157,16 +1161,10 @@ bool KeplerCompute::ReplaceOotNetwork(u64 program_id, u64 native_key) {
             moving = camera.moving;
             reproject = camera.reproject;
         }
-        const u64 frame = FrameCounter().load(std::memory_order_relaxed);
         const u64 scene_frame = SceneFrame().load(std::memory_order_relaxed);
         if (valid) {
-            static const bool flip_y = [] {
-                const char* value = std::getenv("EDEN_OOT_DLSS_FLIP_Y");
-                return value != nullptr && value[0] == '1';
-            }();
-            // A gap (menu, load, cutscene cut) starts DLSS's history again.
-            // A present without a new scene (frame pacing at low frame rates) is not a gap.
-            const bool reset = oot_last_dlss_frame == ~u64{0} || frame > oot_last_dlss_frame + 8;
+            const bool flip_y = FlipY();
+            const bool reset = HistoryReset();
             static u32 resets{}, calls{}, still{};
             resets += reset ? 1 : 0;
             still += moving ? 0 : 1;
@@ -1178,7 +1176,6 @@ bool KeplerCompute::ReplaceOotNetwork(u64 program_id, u64 native_key) {
             }
             done = rasterizer->AccelerateOotDlss(source, destination, *depth_tic,
                                                  Jitter(scene_frame), reproject, flip_y, reset);
-            oot_last_dlss_frame = frame;
         }
         static u32 failures{};
         if (!done && failures++ < 3) {

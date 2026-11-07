@@ -309,7 +309,8 @@ public:
     bool OotDlss(const Tegra::Engines::Fermi2D::Surface& dst,
                  const Tegra::Engines::Fermi2D::Surface& src,
                  const Tegra::Texture::TICEntry& depth, std::array<f32, 2> jitter,
-                 const std::array<f32, 16>& reproject, bool flip_y, bool reset);
+                 const std::array<f32, 16>& reproject, bool flip_y, bool reset,
+                 bool hdr = false);
 
     /// Tags the HUD drawn over the last OotDlss output as frame generation's UI alpha for
     /// Streamline frame `frame_index` (Vulkan with Streamline only).

@@ -225,6 +225,8 @@ private:
     std::array<float, 2> applied_viewport_jitter{};
     /// Ocarina of Time DLSS mode: this frame's camera reprojection, from the first scene draw.
     void CaptureOotCamera();
+    /// Ocarina of Time DLSS on the HDR scene colour, right before the tonemap draw (HdrInput).
+    void OotDlssBeforeTonemap();
     /// Ocarina of Time object motion: creates its resources before a motion pipeline binds them.
     void PrepareOotObjectMotion();
     /// The motion image's size: the scene depth's, scaled, or 1x1 until it is known.
