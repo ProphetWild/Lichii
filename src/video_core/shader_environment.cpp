@@ -387,13 +387,20 @@ std::optional<u64> GenericEnvironment::TryFindSize() {
 
 Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, u32 tic_limit,
                                                              bool via_header_index, u32 raw) {
+    // Read once per handle (nemyu fad78fad4, c961acfcc): a translation asks for a texture's type,
+    // format and integer-ness separately, for every instruction using it. The first read is also
+    // the one Serialize records. Without a flush, as the texture cache reads descriptors: a flush
+    // takes the cache locks and can wait for the GPU, from a shader build.
+    if (const auto it = texture_descriptors.find(raw); it != texture_descriptors.end()) {
+        return it->second;
+    }
     const auto handle{Tegra::Texture::TexturePair(raw, via_header_index)};
     const u32 index{Tegra::Texture::TextureHeaderIndex(handle.first, tic_limit,
                                                        gpu_memory->UsesNativeTiling())};
     ASSERT(index <= tic_limit);
     const GPUVAddr descriptor_addr{tic_addr + index * sizeof(Tegra::Texture::TICEntry)};
     Tegra::Texture::TICEntry entry;
-    gpu_memory->ReadBlock(descriptor_addr, &entry, sizeof(entry));
+    gpu_memory->ReadBlockUnsafe(descriptor_addr, &entry, sizeof(entry));
     if (entry.format.Value() == Tegra::Texture::TextureFormat{} &&
         std::getenv("EDEN_NX2_RENDER_TRACE")) {
         static std::atomic<u32> traces{};
@@ -410,6 +417,7 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
                         entry.raw[0], entry.raw[1], entry.raw[2], entry.raw[3]);
         }
     }
+    texture_descriptors.emplace(raw, entry);
     return entry;
 }
 
