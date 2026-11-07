@@ -902,17 +902,35 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
         return;
     }
 
-    auto it = committed_gpu_modified_ranges.begin();
-    while (it != committed_gpu_modified_ranges.end()) {
-        auto& current_intervals = *it;
-        auto next_it = std::next(it);
-        while (next_it != committed_gpu_modified_ranges.end()) {
-            next_it->ForEach([&current_intervals](DAddr start, DAddr end) {
-                current_intervals.Subtract(start, end - start);
-            });
-            next_it++;
+    // Every copy below reads the buffers as they are now, so only the sets' union matters: merge
+    // them into the first instead of subtracting each later set from every earlier one.
+    // EDEN_NX2_FENCE_RANGE_MERGE=0 subtracts as before.
+    static const bool merge_ranges = [] {
+        const char* value = std::getenv("EDEN_NX2_FENCE_RANGE_MERGE");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (merge_ranges) {
+        Common::RangeSet<DAddr>& merged = committed_gpu_modified_ranges.front();
+        for (auto it = std::next(committed_gpu_modified_ranges.begin());
+             it != committed_gpu_modified_ranges.end(); ++it) {
+            it->ForEach([&merged](DAddr start, DAddr end) { merged.Add(start, end - start); });
         }
-        it++;
+        while (committed_gpu_modified_ranges.size() > 1) {
+            committed_gpu_modified_ranges.pop_back();
+        }
+    } else {
+        auto it = committed_gpu_modified_ranges.begin();
+        while (it != committed_gpu_modified_ranges.end()) {
+            auto& current_intervals = *it;
+            auto next_it = std::next(it);
+            while (next_it != committed_gpu_modified_ranges.end()) {
+                next_it->ForEach([&current_intervals](DAddr start, DAddr end) {
+                    current_intervals.Subtract(start, end - start);
+                });
+                next_it++;
+            }
+            it++;
+        }
     }
 
     boost::container::small_vector<std::pair<BufferCopy, BufferId>, 16> downloads;
