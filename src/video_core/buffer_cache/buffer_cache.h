@@ -3088,10 +3088,11 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
             binding_size = aligned_size;
         }
         if constexpr (requires { runtime.GetMaxStorageBufferRange(); }) {
-            // A read-only pool's 256 MiB compute cap is above the 128 MiB every device
-            // guarantees. Only those are clamped, so no write is cut off.
+            // A read-only pool's alignment can take it past the device's storage buffer range.
+            // Only those are clamped, so no write is cut off.
             if (table_pointer && !is_written) {
-                binding_size = (std::min)(binding_size, runtime.GetMaxStorageBufferRange());
+                binding_size = static_cast<u32>(
+                    (std::min)(u64{binding_size}, runtime.GetMaxStorageBufferRange()));
             }
         }
         return Binding{
