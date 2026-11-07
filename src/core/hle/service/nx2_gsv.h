@@ -60,6 +60,7 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/nx2_video_decoder.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_perf.h"
 #include "video_core/textures/decoders.h"
 #include "core/hle/service/hle_ipc.h"
 #include "core/hle/service/ipc_helpers.h"
@@ -1947,6 +1948,13 @@ private:
         if (forced_interval != 0 && !video_playing) {
             swap_interval = forced_interval;
         }
+        // Ocarina of Time's 30 FPS mode: two vblanks a frame. Its frame step follows the time
+        // measured (Dynamic FPS by Dark), so it keeps full speed. Videos keep their 60 fps.
+        constexpr u64 OcarinaOfTimeId = 0x0400486024DEC000ULL;
+        if (process != nullptr && process->GetProgramId() == OcarinaOfTimeId &&
+            Settings::values.oot_30fps.GetValue() && !video_playing) {
+            swap_interval = (std::max)(swap_interval, 2U);
+        }
         const u32 refresh_rate = (timing & 0xffff) >= 30 && (timing & 0xffff) <= 240 ? timing & 0xffff : 60;
         if (trace) {
             m_frame_trace.interval = swap_interval;
@@ -1954,6 +1962,7 @@ private:
             m_frame_trace.forced = forced_interval;
         }
         if (!Settings::values.use_speed_limit.GetValue() || Settings::SpeedLimit() == 0) {
+            VideoCommon::Nx2Perf::g_guest_frame_interval_ns.store(0, std::memory_order_relaxed);
             return;
         }
         if (timing != std::exchange(m_swap_word, timing)) {
@@ -1962,6 +1971,8 @@ private:
         }
         const auto interval = std::chrono::nanoseconds{
             100'000'000'000LL * swap_interval / refresh_rate / Settings::SpeedLimit()};
+        VideoCommon::Nx2Perf::g_guest_frame_interval_ns.store(interval.count(),
+                                                              std::memory_order_relaxed);
         if (trace) {
             m_frame_trace.target_ms = std::chrono::duration<double, std::milli>(interval).count();
         }
