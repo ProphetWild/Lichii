@@ -34,12 +34,17 @@ bool DebugRequested() {
     return requested;
 }
 
-bool StatsRequested() {
-    static const bool requested = [] {
+/// EDEN_OOT_OBJECT_MOTION_STATS=<n>: log the motion statistics every n evaluations (0: off).
+u32 StatsInterval() {
+    static const u32 interval = [] {
         const char* value = std::getenv("EDEN_OOT_OBJECT_MOTION_STATS");
-        return value != nullptr && value[0] == '1';
+        return value != nullptr ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
     }();
-    return requested;
+    return interval;
+}
+
+bool StatsRequested() {
+    return StatsInterval() != 0;
 }
 
 vk::Buffer CreateStorageBuffer(MemoryAllocator& allocator, VkDeviceSize size, MemoryUsage usage) {
@@ -278,7 +283,8 @@ VkImageView OotMotionVectors::Generate(Scheduler& scheduler, VkImageView depth_v
                         (object_pixels != VK_NULL_HANDLE && StatsRequested() ? 2u : 0u) |
                         (DebugRequested() ? 4u : 0u),
     };
-    if (StatsRequested() && ++generated % 300 == 0) {
+    // The 32-bit sums of 1/16 pixels wrap within a few dozen 4K frames: keep n small.
+    if (StatsRequested() && ++generated % StatsInterval() == 0) {
         ReportStats();
     }
     const bool initialize = !std::exchange(image_initialized, true);

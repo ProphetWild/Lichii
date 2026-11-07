@@ -268,7 +268,7 @@ What was built (files: `vk_oot_object_motion.{h,cpp}`, `emit_spirv_special.cpp`
   so the buffer must not change within a frame.
 - **Tonemap detection** gained fragment shader `3ac011bd2d772994` (outdoor tonemap at another time
   of day); with only the two old hashes, DLSS mode silently fell back to the game's network.
-- `EDEN_OOT_OBJECT_MOTION_STATS=1` logs, every 300 frames: share of scene pixels with a fragment
+- `EDEN_OOT_OBJECT_MOTION_STATS=<n>` logs, every n DLSS evaluations (keep n small at 4K: the sums are 32-bit): share of scene pixels with a fragment
   write, share using it, agreement with camera motion (y as is / negated), and writes behind / in
   front of the scene depth. The atomics cost ~15 fps; leave it off for benchmarks.
 

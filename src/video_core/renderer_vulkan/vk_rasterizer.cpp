@@ -2670,6 +2670,31 @@ void RasterizerVulkan::CaptureOotCamera() {
         camera.known_index = index;
         camera.known_offset = offset;
         camera.known_partner = partner;
+        // EDEN_OOT_CAMERA_TRACE=1: per frame, the capture and the screen centre's camera motion.
+        static const bool trace = [] {
+            const char* value = std::getenv("EDEN_OOT_CAMERA_TRACE");
+            return value != nullptr && value[0] == '1';
+        }();
+        if (trace) {
+            constexpr float z = 0.9f;
+            const float w = reproject[14] * z + reproject[15];
+            std::array<float, 16> other{};
+            gpu_memory->ReadBlockUnsafe(
+                maxwell3d->state.shader_stages[0].const_buffers[index].address + partner,
+                other.data(), 64);
+            const float to_last =
+                camera.has_last ? distance(current, camera.last_view_projection.data()).first
+                                : -1.0f;
+            const float partner_to_last =
+                camera.has_last ? distance(other.data(), camera.last_view_projection.data()).first
+                                : -1.0f;
+            LOG_INFO(Render_Vulkan,
+                     "OoT DLSS camera trace: frame {} c[{}] {:#x} ({:.4f} from last; partner {:#x} "
+                     "{:.4f}), centre motion {:.5f} {:.5f} NDC",
+                     frame, index, offset, to_last, partner, partner_to_last,
+                     w != 0.0f ? (reproject[2] * z + reproject[3]) / w : 0.0f,
+                     w != 0.0f ? (reproject[6] * z + reproject[7]) / w : 0.0f);
+        }
         static u32 changes{};
         if (std::pair{index, offset} != logged && changes < 32) {
             logged = {index, offset};
