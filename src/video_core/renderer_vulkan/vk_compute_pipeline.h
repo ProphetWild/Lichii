@@ -66,12 +66,6 @@ public:
         return shader_hash;
     }
 
-    /// Constant buffer slots (index << 32 | offset) bound as storage buffers, and those left out
-    /// because they held null when this pipeline was built (rebuilt once one is filled).
-    std::vector<u64> pointer_slots;
-    std::vector<u64> null_pointer_slots;
-    u32 pointer_rebuilds{};
-
     /// Storage images written by the last configured dispatch
     [[nodiscard]] std::span<const VideoCommon::ImageViewId> WrittenImages() const noexcept {
         return written_images;
