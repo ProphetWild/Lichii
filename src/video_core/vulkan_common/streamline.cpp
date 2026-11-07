@@ -350,7 +350,13 @@ bool Start() {
     // DLSS model from the loader's folder, else the NVIDIA app's copy.
     const wchar_t* plugin_paths[] = {state.plugin_dir.c_str(), state.model_dir.c_str()};
     // PCL (latency markers) loads by default; frame generation also needs Reflex.
-    const bool want_fg = Settings::values.nvidia_dlss_frame_generation.GetValue();
+    // EDEN_DLSS_FG=0/1 overrides the setting (A/B tests).
+    const bool want_fg = [] {
+        if (const char* value = std::getenv("EDEN_DLSS_FG"); value != nullptr && *value != '\0') {
+            return value[0] == '1';
+        }
+        return Settings::values.nvidia_dlss_frame_generation.GetValue();
+    }();
     const sl::Feature features_dlss[] = {sl::kFeatureDLSS};
     const sl::Feature features_fg[] = {sl::kFeatureDLSS, sl::kFeatureDLSS_G,
                                        sl::kFeatureReflex};
