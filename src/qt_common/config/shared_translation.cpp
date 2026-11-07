@@ -178,7 +178,7 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "of a game's DLSS (AMD FSR 3.1); 0% turns it off.\nAlso sets the sharpening "
               "of the AMD FSR 1 and SGSR window adapting filters."));
     INSERT(Settings, dlss_preset, tr("DLSS Preset:"),
-           tr("NVIDIA DLSS's model. Auto uses the game's choice (preset M for Ocarina of "
+           tr("NVIDIA DLSS's model. Auto uses the game's choice (preset K for Ocarina of "
               "Time). K: NVIDIA's default for Quality and DLAA. L: sharper, more stable, "
               "costlier. M: like L, closer to K in cost.\nTakes effect when a game starts."));
     INSERT(Settings, dlss_sharpening, tr("DLSS Sharpness:"),

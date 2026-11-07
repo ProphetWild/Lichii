@@ -306,7 +306,7 @@ Results so far (Kokiri Forest, 1x, RTX 5090):
   33-layer D32 array (274M texels at 1.5x), which the 2^28-texel guard in `ImageCanRescale` kept
   at 1x, and every colour target bound with it fell back to 1x pass by pass. The guard now
   follows the allocator's backing rule (`ShouldLeaveImageUnbacked`, Lichii #267 `e15125b73`);
-  `EDEN_NX2_RESCALE_TRACE=1` logs why an image stays at 1x. OoT uses preset M
+  `EDEN_NX2_RESCALE_TRACE=1` logs why an image stays at 1x. OoT uses preset K
   (`EDEN_NX2_DLSS_PRESET` overrides).
 - **Diagnostics:** `EDEN_OOT_MOTION_DEBUG=1` shows the motion vectors in place of the image (red:
   length / 32 px; green 0.6: object motion used; +0.3: empty depth). `EDEN_OOT_OBJECT_MOTION_STATS`
