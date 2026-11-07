@@ -122,7 +122,7 @@ A32EmitX64::BlockDescriptor A32EmitX64::Emit(IR::Block& block) {
 
     EmitCondPrelude(ctx);
     typedef void (EmitX64::*EmitHandlerFn)(EmitContext& context, IR::Inst* inst);
-    constexpr EmitHandlerFn opcode_handlers[] = {
+    static constexpr EmitHandlerFn opcode_handlers[] = {
 #define OPCODE(name, type, ...) &EmitX64::Emit##name,
 #define A32OPC(name, type, ...)
 #define A64OPC(name, type, ...)
@@ -132,7 +132,7 @@ A32EmitX64::BlockDescriptor A32EmitX64::Emit(IR::Block& block) {
 #undef A64OPC
     };
     typedef void (A32EmitX64::*A32EmitHandlerFn)(A32EmitContext& context, IR::Inst* inst);
-    constexpr A32EmitHandlerFn a32_handlers[] = {
+    static constexpr A32EmitHandlerFn a32_handlers[] = {
 #define OPCODE(...)
 #define A32OPC(name, type, ...) &A32EmitX64::EmitA32##name,
 #define A64OPC(...)
