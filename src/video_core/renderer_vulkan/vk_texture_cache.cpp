@@ -4712,8 +4712,12 @@ Sampler::Sampler(TextureCacheRuntime& runtime, const Tegra::Texture::TSCEntry& t
 
     if (static std::atomic<u32> logged{}; tsc.mipmap_filter != TextureMipmapFilter::None &&
                                            logged.fetch_add(1) < 12) {
-        LOG_INFO(Render_Vulkan, "Sampler LOD bias {:.3f} (+{:.3f} for the upscale), anisotropy {}",
-                 tsc.LodBias(), ::VideoCommon::OotDlss::UpscaleLodBias(), max_anisotropy);
+        LOG_INFO(Render_Vulkan,
+                 "Sampler LOD bias {:.3f} (+{:.3f} for the upscale), anisotropy {} (min filter {}, "
+                 "reduction {}, LOD clamp {}-{})",
+                 tsc.LodBias(), ::VideoCommon::OotDlss::UpscaleLodBias(), max_anisotropy,
+                 static_cast<u32>(tsc.min_filter.Value()), static_cast<u32>(tsc.reduction_filter.Value()),
+                 static_cast<u32>(tsc.min_lod_clamp.Value()), static_cast<u32>(tsc.max_lod_clamp.Value()));
     }
     f32 min_lod = 0.0f;
     f32 max_lod = 0.25f;

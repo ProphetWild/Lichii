@@ -31,7 +31,13 @@ namespace {
 
 using VideoCore::Surface::PixelFormat;
 
-constexpr size_t SIZE_CAP = size_t{2} << 30;
+/// Bytes one capture may read back: EDEN_NX2_FRAME_DUMP_CAP_GIB (default 2). A sampled capture
+/// of a 4K frame needs more to reach the passes after the 3D.
+const size_t SIZE_CAP = [] {
+    const char* const value = std::getenv("EDEN_NX2_FRAME_DUMP_CAP_GIB");
+    const unsigned long long gib = value != nullptr ? std::strtoull(value, nullptr, 10) : 0;
+    return size_t{gib != 0 ? gib : 2} << 30;
+}();
 /// RecordingSampledTextures: a sampled capture is running.
 std::atomic<bool> recording_sampled{};
 constexpr size_t STAGING_BUDGET = size_t{256} << 20;
