@@ -1135,6 +1135,19 @@ bool Device::GetSuitability(bool requires_swapchain) {
     FOR_EACH_VK_FEATURE_EXT(FEATURE_EXTENSION);
     FOR_EACH_VK_EXTENSION(EXTENSION);
 
+#ifdef EGLANTINE_STREAMLINE
+    // VK_KHR_present_id and VK_KHR_present_wait (the host frame pacer) stay out of the device
+    // with DLSS Frame Generation, which presents through its own path: with them in the device
+    // (even disabled after the features query) it showed no generated frames in fullscreen
+    // (Streamline: 1 frame presented per real frame).
+    if (Streamline::ExtraGraphicsFamilyQueues() != 0) {
+        loaded_extensions.erase(VK_KHR_PRESENT_ID_EXTENSION_NAME);
+        loaded_extensions.erase(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+        extensions.present_id = false;
+        extensions.present_wait = false;
+    }
+#endif
+
     extensions.depth_stencil_resolve =
         extensions.depth_stencil_resolve &&
         (instance_version >= VK_API_VERSION_1_2 || extensions.create_renderpass2);
