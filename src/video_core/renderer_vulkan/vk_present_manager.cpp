@@ -169,7 +169,7 @@ PresentManager::PresentManager(const vk::Instance& instance_,
         free_queue.push_back(&frame);
     }
 
-    // Without the present thread frames are not held, but how long each is shown is measured.
+    // Without the present thread frames are only held with a variable refresh rate (PaceFrame).
     // DLSS Frame Generation presents through its own swapchain: the ids of ours are never shown.
 #ifdef EGLANTINE_STREAMLINE
     const bool dlss_frame_generation = Streamline::IsFrameGenerationAvailable();
@@ -182,8 +182,8 @@ PresentManager::PresentManager(const vk::Instance& instance_,
              dlss_frame_generation ? "not used: DLSS Frame Generation paces the frames"
              : !present_wait_enabled ? "unavailable, frames are not paced"
              : use_present_thread  ? "supported"
-                                   : "supported, frames are only measured (asynchronous "
-                                     "presentation is off)");
+                                   : "supported, frames are paced only with a variable "
+                                     "refresh rate (asynchronous presentation is off)");
     if (present_wait_enabled) {
         present_wait_thread =
             std::jthread([this](std::stop_token token) { PresentWaitThread(token); });
@@ -236,15 +236,14 @@ void PresentManager::Present(Frame* frame) {
         });
     } else {
         scheduler.WaitWorker();
+        frame->queued_at = std::chrono::steady_clock::now();
+        bool held = false;
         if (present_wait_enabled) {
-            const auto now = std::chrono::steady_clock::now();
-            pacer.NoteQueued(now);
-            pacer.Refresh(now, false, false, render_window.GetWindowInfo().render_surface);
-            DrainShown();
+            held = PaceFrame(frame, {});
         } else {
-            arrivals.Note(std::chrono::steady_clock::now());
+            arrivals.Note(frame->queued_at);
         }
-        SubmitToSwapchain(frame, false);
+        SubmitToSwapchain(frame, held);
         free_queue.push_back(frame);
     }
 }
@@ -449,9 +448,13 @@ bool PresentManager::PaceFrame(Frame* frame, std::stop_token token) {
     // Immediate presents are shown at once on a variable refresh rate display (they tear on a
     // fixed one, where pacing them to the game's period does no harm either).
     const bool variable_refresh = mode == VK_PRESENT_MODE_IMMEDIATE_KHR;
+    // Without the present thread a hold stops the GPU thread: only with a variable refresh rate,
+    // where the holds are short (the game's own pacing keeps its frames near the period).
+    const bool grid =
+        mode == VK_PRESENT_MODE_FIFO_KHR || mode == VK_PRESENT_MODE_MAILBOX_KHR ||
+        mode == VK_PRESENT_MODE_FIFO_RELAXED_KHR;
     const bool allowed =
-        (mode == VK_PRESENT_MODE_FIFO_KHR || mode == VK_PRESENT_MODE_MAILBOX_KHR ||
-         mode == VK_PRESENT_MODE_FIFO_RELAXED_KHR || variable_refresh) &&
+        ((grid && use_present_thread) || variable_refresh) &&
         !Settings::values.frame_gen.GetValue() && Settings::values.use_speed_limit.GetValue() &&
         Settings::values.current_speed_mode.GetValue() != Settings::SpeedMode::Turbo;
     pacer.Refresh(Clock::now(), allowed, variable_refresh,

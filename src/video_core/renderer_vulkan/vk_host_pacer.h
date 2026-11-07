@@ -28,8 +28,8 @@ namespace Vulkan {
 /// there is no grid: frames are held until the game's frame period after the previous one was
 /// shown, which only matters when the game holds its period (Ocarina's 30 FPS mode).
 ///
-/// Holds frames on the present thread (asynchronous presentation); without it, and under DLSS
-/// Frame Generation, it does not hold them. Reports how long frames were shown every 10 s.
+/// Holds frames on the present thread (asynchronous presentation); without it only in the
+/// variable refresh rate mode, and never under DLSS Frame Generation. Reports how long frames were shown every 10 s.
 class HostPacer {
 public:
     using Clock = std::chrono::steady_clock;
