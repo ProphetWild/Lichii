@@ -310,7 +310,8 @@ public:
                  const Tegra::Engines::Fermi2D::Surface& src,
                  const Tegra::Texture::TICEntry& depth, std::array<f32, 2> jitter,
                  const std::array<f32, 16>& reproject, bool flip_y, bool reset,
-                 bool hdr = false);
+                 bool hdr = false,
+                 const Tegra::Engines::Maxwell3D::Regs::RenderTargetConfig* effects = nullptr);
 
     /// Tags the HUD drawn over the last OotDlss output as frame generation's UI alpha for
     /// Streamline frame `frame_index` (Vulkan with Streamline only).

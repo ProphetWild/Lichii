@@ -24,16 +24,25 @@ public:
     ~OotMotionVectors();
 
     /// Records the pass; returns the motion vector image (GENERAL layout) at `size`.
-    /// `object_pixels` (two words per pixel of `size`, OotObjectMotion) may be null.
+    /// `object_pixels` (two words per pixel of `size`, OotObjectMotion) may be null. With
+    /// `effects_view` (any size), the mask image gets its brightest channel times `mask_gain`.
     VkImageView Generate(Scheduler& scheduler, VkImageView depth_view, VkExtent2D size,
                          const std::array<f32, 16>& reproject, std::array<f32, 2> jitter,
-                         bool flip_y, VkBuffer object_pixels);
+                         bool flip_y, VkBuffer object_pixels, VkImageView effects_view = {},
+                         f32 mask_gain = 0.0f);
 
     [[nodiscard]] VkImage Image() const noexcept {
         return *image;
     }
     [[nodiscard]] VkImageView View() const noexcept {
         return *view;
+    }
+    /// DLSS's bias-to-current-colour mask (R8, GENERAL layout), written with the motion.
+    [[nodiscard]] VkImage MaskImage() const noexcept {
+        return *mask_image;
+    }
+    [[nodiscard]] VkImageView MaskView() const noexcept {
+        return *mask_view;
     }
 
 private:
@@ -53,8 +62,11 @@ private:
     vk::ShaderModule shader;
     vk::Pipeline pipeline;
     vk::Sampler sampler;
+    vk::Sampler linear_sampler;
     vk::Image image;
     vk::ImageView view;
+    vk::Image mask_image;
+    vk::ImageView mask_view;
     VkExtent2D extent{};
     bool image_initialized{};
     // Bound when there is no object motion.

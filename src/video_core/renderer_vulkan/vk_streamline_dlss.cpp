@@ -549,8 +549,18 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
                                    sl::ResourceLifecycle::eValidUntilEvaluate, &render_area};
         sl::ResourceTag output_tag{&output, sl::kBufferTypeScalingOutputColor,
                                    sl::ResourceLifecycle::eValidUntilEvaluate, &output_area};
-        const sl::BaseStructure* inputs[] = {&viewport, &color_tag, &depth_tag, &motion_tag,
-                                             &output_tag};
+        sl::Resource mask{};
+        sl::ResourceTag mask_tag{};
+        if (in.bias_mask) {
+            mask = Resource(in.bias_mask->image, in.bias_mask->view, in.bias_mask->format,
+                            VK_IMAGE_LAYOUT_GENERAL, in.render_size,
+                            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+            mask_tag = sl::ResourceTag{&mask, sl::kBufferTypeBiasCurrentColorHint,
+                                       sl::ResourceLifecycle::eValidUntilEvaluate, &render_area};
+        }
+        std::array<const sl::BaseStructure*, 6> inputs{
+            &viewport, &color_tag, &depth_tag, &motion_tag, &output_tag, &mask_tag};
+        const u32 input_count = in.bias_mask ? 6 : 5;
         const std::array to_general{
             Barrier(in.color, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_READ_BIT | WRITES,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL),
@@ -588,7 +598,7 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
                 return api_result == sl::Result::eOk;
             },
             [&] {
-                api_result = api.evaluate_feature(sl::kFeatureDLSS, *frame, inputs, std::size(inputs),
+                api_result = api.evaluate_feature(sl::kFeatureDLSS, *frame, inputs.data(), input_count,
                                                   reinterpret_cast<sl::CommandBuffer*>(*cmdbuf));
                 if (api_result != sl::Result::eOk || !frame_generation) {
                     return api_result == sl::Result::eOk;

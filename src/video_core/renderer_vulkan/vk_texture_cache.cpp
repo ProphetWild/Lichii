@@ -1981,7 +1981,7 @@ bool TextureCacheRuntime::UpscaleWithDlss(Framebuffer* dst_framebuffer, ImageVie
 bool TextureCacheRuntime::OotDlss(Framebuffer* dst_framebuffer, ImageView& input_color,
                                   ImageView& depth, std::array<u32, 2> render_size,
                                   std::array<f32, 2> jitter, const std::array<f32, 16>& reproject,
-                                  bool flip_y, bool reset, bool hdr) {
+                                  bool flip_y, bool reset, bool hdr, ImageView* effects) {
 #ifdef EGLANTINE_STREAMLINE
     if (dlss_unsupported) {
         return false;
@@ -2021,8 +2021,12 @@ bool TextureCacheRuntime::OotDlss(Framebuffer* dst_framebuffer, ImageView& input
             }
         }
     }
-    const VkImageView motion_view = oot_motion_vectors->Generate(
-        scheduler, depth.DepthView(), size, reproject, jitter, flip_y, object_pixels);
+    const VkImageView effects_view =
+        effects != nullptr ? effects->Handle(Shader::TextureType::Color2D) : VK_NULL_HANDLE;
+    const VkImageView motion_view =
+        oot_motion_vectors->Generate(scheduler, depth.DepthView(), size, reproject, jitter, flip_y,
+                                     object_pixels, effects_view,
+                                     ::VideoCommon::OotDlss::MaskGain());
     const auto image = [&](ImageView& view, VkImageView handle, VkImageAspectFlags aspect) {
         return StreamlineDlssUpscaler::Image{
             .view = handle,
@@ -2059,6 +2063,22 @@ bool TextureCacheRuntime::OotDlss(Framebuffer* dst_framebuffer, ImageView& input
                 },
                 .barrier_aspect = VK_IMAGE_ASPECT_COLOR_BIT,
             },
+            .bias_mask =
+                effects_view != VK_NULL_HANDLE
+                    ? std::optional{StreamlineDlssUpscaler::Image{
+                          .view = oot_motion_vectors->MaskView(),
+                          .image = oot_motion_vectors->MaskImage(),
+                          .format = VK_FORMAT_R8_UNORM,
+                          .range{
+                              .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                              .baseMipLevel = 0,
+                              .levelCount = 1,
+                              .baseArrayLayer = 0,
+                              .layerCount = 1,
+                          },
+                          .barrier_aspect = VK_IMAGE_ASPECT_COLOR_BIT,
+                      }}
+                    : std::nullopt,
             .render_size = size,
             .upscale_size = extent,
             .jitter = jitter,

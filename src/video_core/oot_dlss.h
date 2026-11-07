@@ -324,6 +324,18 @@ inline std::atomic<u64>& FrameCounter() {
     return frame;
 }
 
+/// Gain from the effects layer's brightest channel to DLSS's bias-to-current-colour mask
+/// (fireflies ~0.1 bright make ~0.8). EDEN_OOT_DLSS_MASK_GAIN=<n>; 0 turns the mask off.
+inline float MaskGain() {
+    static const float gain = [] {
+        if (const char* value = std::getenv("EDEN_OOT_DLSS_MASK_GAIN")) {
+            return static_cast<float>(std::strtod(value, nullptr));
+        }
+        return 8.0f;
+    }();
+    return gain;
+}
+
 /// EDEN_OOT_DLSS_FLIP_Y=1: the motion vectors' y the other way round (diagnosis).
 inline bool FlipY() {
     static const bool flip = [] {

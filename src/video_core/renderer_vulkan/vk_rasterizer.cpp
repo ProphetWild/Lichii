@@ -446,6 +446,19 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         // B10G11R11 target of the scene's size.
         const auto& targets = VideoCommon::OotDlss::Targets();
         const auto& rt0 = maxwell3d->regs.rt[0];
+        // The effects layer: one RGBA16F target at half the scene's size (the volumetric fog
+        // draws two at once).
+        if (VideoCommon::OotDlss::Requested() && VideoCommon::OotDlss::MaskGain() > 0.0f &&
+            maxwell3d->regs.rt_control.count == 1 &&
+            rt0.format == Tegra::RenderTargetFormat::R16G16B16A16_FLOAT &&
+            rt0.width * 2 == targets.depth_width.load(std::memory_order_relaxed) &&
+            rt0.height * 2 == targets.depth_height.load(std::memory_order_relaxed)) {
+            if (!oot_effects_rt || oot_effects_rt->Address() != rt0.Address()) {
+                LOG_INFO(Render_Vulkan, "OoT DLSS: effects layer at {:#x} {}x{}", rt0.Address(),
+                         u32{rt0.width}, u32{rt0.height});
+            }
+            oot_effects_rt = rt0;
+        }
         const bool tonemap_target =
             rt0.format == Tegra::RenderTargetFormat::B10G11R11_FLOAT &&
             rt0.width == targets.depth_width.load(std::memory_order_relaxed) &&
@@ -2266,7 +2279,8 @@ bool RasterizerVulkan::AccelerateOotDlss(const Tegra::Engines::Fermi2D::Surface&
                                          const std::array<f32, 16>& reproject, bool flip_y,
                                          bool reset) {
     std::scoped_lock lock{texture_cache.mutex};
-    return texture_cache.OotDlss(dst, src, depth, jitter, reproject, flip_y, reset);
+    return texture_cache.OotDlss(dst, src, depth, jitter, reproject, flip_y, reset, false,
+                                 oot_effects_rt ? &*oot_effects_rt : nullptr);
 }
 
 void RasterizerVulkan::OotTagUiAlpha(u32 frame_index) {
@@ -2872,7 +2886,8 @@ void RasterizerVulkan::OotDlssBeforeTonemap() {
     // DLSS writes the network output's image (free until the network pass), then that goes
     // back over the scene colour the tonemap reads.
     if (!texture_cache.OotDlss(output, scene, *depth_tic, Jitter(scene_frame), reproject, FlipY(),
-                               HistoryReset(), true)) {
+                               HistoryReset(), true,
+                               oot_effects_rt ? &*oot_effects_rt : nullptr)) {
         static u32 failures{};
         if (failures++ < 3) {
             LOG_WARNING(Render_Vulkan, "OoT DLSS: HDR evaluation unavailable this frame");

@@ -27,6 +27,11 @@ layout (binding = 3, std430) buffer Stats {
     uint stats[11];
 };
 
+// The half-resolution effects layer (fireflies, fairies, dust: no motion vectors) and DLSS's
+// bias-to-current-colour mask made from it.
+layout (binding = 4) uniform sampler2D effects_texture;
+layout (binding = 5, r8) uniform writeonly image2D bias_mask;
+
 layout (push_constant) uniform PushConstants {
     // Row-major: previous clip = reproject * current NDC (with w = 1).
     vec4 reproject_rows[4];
@@ -37,7 +42,10 @@ layout (push_constant) uniform PushConstants {
     float flip_y;
     // Bit 0: read object motion. Bit 1: count statistics. Bit 2: debug view (red: the motion
     // length / 32 px; green: 0.6 where object motion is used, plus 0.3 where the depth is empty).
+    // Bit 3: effects_texture is bound (else the mask is 0).
     uint object_flags;
+    // Effects layer brightness to mask value.
+    float mask_gain;
 };
 
 void main() {
@@ -46,6 +54,13 @@ void main() {
         return;
     }
     const vec2 uv = (vec2(pixel) + 0.5 - jitter) / render_size;
+    float mask = 0.0;
+    if ((object_flags & 8u) != 0u) {
+        const vec3 effects =
+            textureLod(effects_texture, (vec2(pixel) + 0.5) / render_size, 0.0).rgb;
+        mask = clamp(max(effects.r, max(effects.g, effects.b)) * mask_gain, 0.0, 1.0);
+    }
+    imageStore(bias_mask, pixel, vec4(mask));
     const float depth = texelFetch(depth_texture, pixel, 0).r;
     vec4 ndc = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
     if (flip_y > 0.5) {

@@ -227,6 +227,9 @@ private:
     void CaptureOotCamera();
     /// Ocarina of Time DLSS on the HDR scene colour, right before the tonemap draw (HdrInput).
     void OotDlssBeforeTonemap();
+    /// Ocarina of Time's half-resolution effects layer (fireflies, fairies, dust), learned from
+    /// the draws into it: DLSS's bias-to-current-colour mask.
+    std::optional<Tegra::Engines::Maxwell3D::Regs::RenderTargetConfig> oot_effects_rt;
     /// Ocarina of Time object motion: creates its resources before a motion pipeline binds them.
     void PrepareOotObjectMotion();
     /// The motion image's size: the scene depth's, scaled, or 1x1 until it is known.

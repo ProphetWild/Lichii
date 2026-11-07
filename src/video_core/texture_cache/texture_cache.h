@@ -1456,7 +1456,8 @@ bool TextureCache<P>::OotDlss(const Tegra::Engines::Fermi2D::Surface& dst,
                               const Tegra::Engines::Fermi2D::Surface& src,
                               const Tegra::Texture::TICEntry& depth, std::array<f32, 2> jitter,
                               const std::array<f32, 16>& reproject, bool flip_y, bool reset,
-                              bool hdr) {
+                              bool hdr,
+                              const Tegra::Engines::Maxwell3D::Regs::RenderTargetConfig* effects) {
     if constexpr (FRAMEBUFFER_BLITS ||
                   !requires(Runtime& r, Framebuffer* f, ImageView& v) {
                       r.OotDlss(f, v, v, std::array<u32, 2>{}, jitter, reproject, flip_y, reset);
@@ -1485,6 +1486,19 @@ bool TextureCache<P>::OotDlss(const Tegra::Engines::Fermi2D::Surface& dst,
             FindOrInsertImage(ImageInfo(depth), depth.Address(), RelaxedOptions{});
         if (has_deleted_images || !depth_id) {
             return false;
+        }
+        // The effects layer, for DLSS's bias-to-current-colour mask (optional).
+        ImageId effects_id{};
+        if (effects != nullptr && VideoCommon::OotDlss::MaskGain() > 0.0f) {
+            effects_id =
+                FindOrInsertImage(ImageInfo(*effects, Tegra::Texture::MsaaMode::Msaa1x1),
+                                  effects->Address(), RelaxedOptions{});
+            if (has_deleted_images) {
+                return false;
+            }
+            if (effects_id) {
+                PrepareImage(effects_id, false, false);
+            }
         }
         const ImageId dst_id = result->dst_id;
         const ImageId src_id = result->src_id;
@@ -1538,10 +1552,21 @@ bool TextureCache<P>::OotDlss(const Tegra::Engines::Fermi2D::Surface& dst,
         if (!depth_view) {
             return false;
         }
+        ImageViewId effects_view{};
+        if (effects_id && slot_images[effects_id].info.format == PixelFormat::R16G16B16A16_FLOAT) {
+            if (const std::optional base =
+                    slot_images[effects_id].TryFindBase(effects->Address())) {
+                const SubresourceRange range{.base = *base, .extent = {1, 1}};
+                effects_view = FindOrEmplaceImageView(
+                    effects_id,
+                    ImageViewInfo(ImageViewType::e2D, PixelFormat::R16G16B16A16_FLOAT, range));
+            }
+        }
         Framebuffer* const dst_framebuffer = &slot_framebuffers[dst_view->first];
         if (!runtime.OotDlss(dst_framebuffer, slot_image_views[src_view->second],
                              slot_image_views[depth_view], render_size, jitter, reproject, flip_y,
-                             reset, hdr)) {
+                             reset, hdr,
+                             effects_view ? &slot_image_views[effects_view] : nullptr)) {
             return false;
         }
         Image& dst_image = slot_images[dst_id];

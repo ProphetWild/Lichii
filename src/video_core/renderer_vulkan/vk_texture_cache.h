@@ -149,7 +149,7 @@ public:
     bool OotDlss(Framebuffer* dst_framebuffer, ImageView& input_color, ImageView& depth,
                  std::array<u32, 2> render_size, std::array<f32, 2> jitter,
                  const std::array<f32, 16>& reproject, bool flip_y, bool reset,
-                 bool hdr = false);
+                 bool hdr = false, ImageView* effects = nullptr);
 
     /// After OotDlss drew DLSS's output into `image`: keeps a copy without the HUD for frame
     /// generation's UI alpha (see OotUiAlpha).

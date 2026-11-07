@@ -24,6 +24,7 @@ struct PushConstants {
     std::array<f32, 2> jitter;
     f32 flip_y;
     u32 object_flags;
+    f32 mask_gain;
 };
 
 bool DebugRequested() {
@@ -86,7 +87,8 @@ OotMotionVectors::OotMotionVectors(const Device& device_, MemoryAllocator& alloc
     descriptor_set_layout = CreateWrappedDescriptorSetLayout(
         device,
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},
         VK_SHADER_STAGE_COMPUTE_BIT);
     const std::array layouts{*descriptor_set_layout, *descriptor_set_layout,
                              *descriptor_set_layout, *descriptor_set_layout};
@@ -108,6 +110,7 @@ OotMotionVectors::OotMotionVectors(const Device& device_, MemoryAllocator& alloc
     shader = CreateWrappedShaderModule(device, OOT_MOTION_VECTORS_COMP_SPV);
     pipeline = CreateWrappedComputePipeline(device, pipeline_layout, *shader);
     sampler = CreateWrappedSampler(device, VK_FILTER_NEAREST);
+    linear_sampler = CreateWrappedSampler(device, VK_FILTER_LINEAR);
     dummy_pixels = CreateStorageBuffer(allocator, 64, MemoryUsage::DeviceLocal);
     stats = CreateStorageBuffer(allocator, 64, MemoryUsage::Download);
     if (auto mapped = stats.Mapped(); !mapped.empty()) {
@@ -184,6 +187,39 @@ void OotMotionVectors::CreateImage(VkExtent2D size) {
             .layerCount = 1,
         },
     });
+    mask_image = allocator.CreateImage(VkImageCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_R8_UNORM,
+        .extent = {size.width, size.height, 1},
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    });
+    mask_view = device.GetLogical().CreateImageView(VkImageViewCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .image = *mask_image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = VK_FORMAT_R8_UNORM,
+        .components{},
+        .subresourceRange{
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    });
     extent = size;
     image_initialized = false;
 }
@@ -191,7 +227,8 @@ void OotMotionVectors::CreateImage(VkExtent2D size) {
 VkImageView OotMotionVectors::Generate(Scheduler& scheduler, VkImageView depth_view,
                                        VkExtent2D size, const std::array<f32, 16>& reproject,
                                        std::array<f32, 2> jitter, bool flip_y,
-                                       VkBuffer object_pixels) {
+                                       VkBuffer object_pixels, VkImageView effects_view,
+                                       f32 mask_gain) {
     if (!image || extent.width != size.width || extent.height != size.height) {
         if (image) {
             scheduler.Finish(); // the old image may still be read
@@ -221,6 +258,17 @@ VkImageView OotMotionVectors::Generate(Scheduler& scheduler, VkImageView depth_v
         .buffer = *stats,
         .offset = 0,
         .range = VK_WHOLE_SIZE,
+    };
+    // Without an effects layer the depth stands in (the shader skips it).
+    const VkDescriptorImageInfo effects_info{
+        .sampler = *linear_sampler,
+        .imageView = effects_view != VK_NULL_HANDLE ? effects_view : depth_view,
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+    };
+    const VkDescriptorImageInfo mask_info{
+        .sampler = VK_NULL_HANDLE,
+        .imageView = *mask_view,
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
     };
     const std::array writes{
         VkWriteDescriptorSet{
@@ -271,6 +319,30 @@ VkImageView OotMotionVectors::Generate(Scheduler& scheduler, VkImageView depth_v
             .pBufferInfo = &stats_info,
             .pTexelBufferView = nullptr,
         },
+        VkWriteDescriptorSet{
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext = nullptr,
+            .dstSet = set,
+            .dstBinding = 4,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &effects_info,
+            .pBufferInfo = nullptr,
+            .pTexelBufferView = nullptr,
+        },
+        VkWriteDescriptorSet{
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext = nullptr,
+            .dstSet = set,
+            .dstBinding = 5,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .pImageInfo = &mask_info,
+            .pBufferInfo = nullptr,
+            .pTexelBufferView = nullptr,
+        },
     };
     device.GetLogical().UpdateDescriptorSets(writes, {});
 
@@ -281,7 +353,9 @@ VkImageView OotMotionVectors::Generate(Scheduler& scheduler, VkImageView depth_v
         .flip_y = flip_y ? 1.0f : 0.0f,
         .object_flags = (object_pixels != VK_NULL_HANDLE ? 1u : 0u) |
                         (object_pixels != VK_NULL_HANDLE && StatsRequested() ? 2u : 0u) |
-                        (DebugRequested() ? 4u : 0u),
+                        (DebugRequested() ? 4u : 0u) |
+                        (effects_view != VK_NULL_HANDLE ? 8u : 0u),
+        .mask_gain = mask_gain,
     };
     // The 32-bit sums of 1/16 pixels wrap within a few dozen 4K frames: keep n small.
     if (StatsRequested() && ++generated % StatsInterval() == 0) {
@@ -290,12 +364,15 @@ VkImageView OotMotionVectors::Generate(Scheduler& scheduler, VkImageView depth_v
     const bool initialize = !std::exchange(image_initialized, true);
 
     const VkImage output_image = *image;
+    const VkImage mask = *mask_image;
     const VkPipeline compute_pipeline = *pipeline;
     const VkPipelineLayout layout = *pipeline_layout;
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
         if (initialize) {
             TransitionImageLayout(cmdbuf, output_image, VK_IMAGE_LAYOUT_GENERAL,
+                                  VK_IMAGE_LAYOUT_UNDEFINED);
+            TransitionImageLayout(cmdbuf, mask, VK_IMAGE_LAYOUT_GENERAL,
                                   VK_IMAGE_LAYOUT_UNDEFINED);
         }
 

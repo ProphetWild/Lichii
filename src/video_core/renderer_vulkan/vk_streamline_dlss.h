@@ -33,6 +33,9 @@ public:
         Image color;          ///< Jittered linear colour at the render size.
         Image depth;          ///< Device depth (reversed) at the render size.
         Image motion_vectors; ///< Motion to the previous frame at the render size.
+        /// R8 mask at the render size (GENERAL layout): where DLSS should trust this frame's
+        /// colour over its history (things without motion vectors). Optional.
+        std::optional<Image> bias_mask;
         VkExtent2D render_size;
         VkExtent2D upscale_size;
         /// This frame's sample offset in render pixels, as the game hands its own DLSS.
