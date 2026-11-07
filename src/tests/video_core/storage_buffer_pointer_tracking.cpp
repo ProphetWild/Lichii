@@ -459,8 +459,7 @@ TEST_CASE("Native accesses the backend cannot route keep their paired cbuf point
 
 TEST_CASE("Loaded pointers that compete with a pair do not take the last storage buffer",
           "[shader][storage_buffer]") {
-    // The other pointers fill every compute binding with c0[0x30]; the loaded pointer would be one
-    // more.
+    // 31 more pointers fill every binding with c0[0x30]; the loaded pointer would be the 33rd.
     DirectOrLoadedPointer program;
     static_cast<void>(program.record->LoadGlobal128(program.RecordAddress(false)));
     IR::IREmitter ir{program.fixture.entry};
