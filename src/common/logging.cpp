@@ -337,7 +337,14 @@ struct DebuggerBackend final : public Backend {
     explicit DebuggerBackend() noexcept = default;
     ~DebuggerBackend() noexcept override = default;
     void Write(const Entry& entry) noexcept override {
-        ::OutputDebugStringW(UTF8ToUTF16W(FormatLogMessage(entry)).c_str());
+        // Only a debugger reads this; EDEN_LOG_DEBUG_OUTPUT=1 keeps it on for DebugView.
+        static const bool always = [] {
+            const char* const value = std::getenv("EDEN_LOG_DEBUG_OUTPUT");
+            return value != nullptr && value[0] == '1';
+        }();
+        if (always || ::IsDebuggerPresent()) {
+            ::OutputDebugStringW(UTF8ToUTF16W(FormatLogMessage(entry)).c_str());
+        }
     }
     void Flush() noexcept override {}
 };
