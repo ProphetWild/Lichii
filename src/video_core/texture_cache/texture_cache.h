@@ -59,6 +59,9 @@ inline bool RescaleTraceEnabled() {
     return enabled;
 }
 
+/// Images wider or taller than this at 1x are not screen images and stay at 1x.
+inline constexpr u32 MaxScreenImageSide = 4096;
+
 inline void TraceRescale(const ImageBase& image, std::string_view reason,
                          const ImageBase* other = nullptr) {
     static std::mutex mutex;
@@ -2413,6 +2416,15 @@ bool TextureCache<P>::ImageCanRescale(ImageBase& image) {
         return false;
     }
     if (Settings::values.resolution_info.downscale && !image.info.downscaleable) {
+        return false;
+    }
+    if (image.info.size.width > MaxScreenImageSide || image.info.size.height > MaxScreenImageSide) {
+        // Larger than any screen the console outputs (3840x2160): a shadow map or an atlas, which
+        // scaling only makes bigger (Ocarina of Time's 12288x12288 sun shadow map: ~650 MiB at
+        // 1.5x).
+        if (RescaleTraceEnabled()) {
+            TraceRescale(image, "larger than any screen");
+        }
         return false;
     }
     {
