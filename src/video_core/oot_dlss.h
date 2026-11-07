@@ -122,6 +122,13 @@ inline bool IsTonemapShader(u64 hash) {
            hash == 0x3ac011bd2d772994ULL;
 }
 
+/// The fullscreen vertex shader of the tonemap passes. The fragment shader varies with the scene
+/// (96d6efdbfe52605c in front of the Kokiri shop): matched on its own, an unknown variant kept
+/// the last tonemapped image, which froze the copy and fed DLSS a stale frame (smearing).
+inline bool IsTonemapVertexShader(u64 hash) {
+    return hash == 0x7bb354754112ad1aULL;
+}
+
 /// Learned each frame from the network's own texture handles; 0 until seen.
 struct SceneTargets {
     std::atomic<u64> depth_gpu{};  ///< D32 main scene depth (jittered draws bind it)

@@ -442,8 +442,17 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     }
     if (pipeline && VideoCommon::OotDlss::ReplacesNetwork() &&
         Settings::GetCurrentProgramID() == VideoCommon::OotDlss::ProgramId) [[unlikely]] {
+        // A tonemap pass: a known fragment shader, or the tonemap vertex shader drawing a
+        // B10G11R11 target of the scene's size.
+        const auto& targets = VideoCommon::OotDlss::Targets();
+        const auto& rt0 = maxwell3d->regs.rt[0];
+        const bool tonemap_target =
+            rt0.format == Tegra::RenderTargetFormat::B10G11R11_FLOAT &&
+            rt0.width == targets.depth_width.load(std::memory_order_relaxed) &&
+            rt0.height == targets.depth_height.load(std::memory_order_relaxed);
         for (const u64 hash : pipeline->ShaderHashes()) {
-            if (VideoCommon::OotDlss::IsTonemapShader(hash)) {
+            if (VideoCommon::OotDlss::IsTonemapShader(hash) ||
+                (tonemap_target && VideoCommon::OotDlss::IsTonemapVertexShader(hash))) {
                 const u64 target = maxwell3d->regs.rt[0].Address();
                 auto& tonemapped = VideoCommon::OotDlss::Targets().tonemapped_gpu;
                 if (target != 0 && tonemapped.exchange(target, std::memory_order_relaxed) != target) {
@@ -2634,12 +2643,18 @@ void RasterizerVulkan::CaptureOotCamera() {
     // it is (seen: c[7] +0x100), unless it is clearly the one last frame's capture is close to.
     // The older matrix need not be last frame's, so "further from last frame's" alone can't
     // tell them apart.
-    const auto high_is_current = [&](const float* low, const float* high) {
+    // With a still camera both match last frame's up to float noise, which then picked the other
+    // one every frame: a back-and-forth motion of ~0.1 px while standing still (indoors). There
+    // the slot taken last frame (`prefer_high`) stays.
+    const auto high_is_current = [&](const float* low, const float* high, bool prefer_high) {
         if (!camera.has_last) {
-            return true;
+            return prefer_high;
         }
-        const float to_low = distance(low, camera.last_view_projection.data()).first;
+        const auto [to_low, magnitude] = distance(low, camera.last_view_projection.data());
         const float to_high = distance(high, camera.last_view_projection.data()).first;
+        if ((std::max)(to_low, to_high) < 1e-4f * magnitude) {
+            return prefer_high;
+        }
         return !(to_high < 0.5f * to_low);
     };
     const auto take = [&](u32 index, u32 offset, u32 partner, const float* current) {
@@ -2717,7 +2732,8 @@ void RasterizerVulkan::CaptureOotCamera() {
             gpu_memory->ReadBlockUnsafe(cbuf.address + low_offset, low.data(), 64);
             gpu_memory->ReadBlockUnsafe(cbuf.address + high_offset, high.data(), 64);
             if (IsPerspective(low.data()) && IsPerspective(high.data())) {
-                const bool high_current = high_is_current(low.data(), high.data());
+                const bool high_current = high_is_current(low.data(), high.data(),
+                                                           camera.known_offset == high_offset);
                 if (take(camera.known_index, high_current ? high_offset : low_offset,
                          high_current ? low_offset : high_offset,
                          high_current ? high.data() : low.data())) {
@@ -2776,7 +2792,11 @@ void RasterizerVulkan::CaptureOotCamera() {
                     continue;
                 }
                 const u32 offset =
-                    high_is_current(first, second) ? candidates[b] : candidates[a];
+                    high_is_current(first, second,
+                                    !(camera.known_index == index &&
+                                      camera.known_offset == candidates[a]))
+                        ? candidates[b]
+                        : candidates[a];
                 const u32 partner = offset == candidates[a] ? candidates[b] : candidates[a];
                 if (take(index, offset, partner, words.data() + offset / 4)) {
                     return;
