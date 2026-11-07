@@ -245,11 +245,16 @@ struct Camera {
     u64 frame = ~u64{0};
     bool valid{};
     u32 searched{}; ///< draws searched this frame
-    bool moving{};  ///< found a pair that differs: no need to search further this frame
-    /// Where the last pair that differed was (constant buffer, current and previous offsets).
+    bool found{};   ///< this frame's view-projection was found
+    bool moving{};  ///< it differs from last frame's
+    /// Last frame's view-projection, when it was found (the previous one for camera motion).
+    std::array<float, 16> last_view_projection{};
+    bool has_last{};
+    /// Where the camera's pair was found last (constant buffer, this frame's offset then, and the
+    /// other matrix's).
     u32 known_index = ~0u;
-    u32 known_current{};
-    u32 known_previous{};
+    u32 known_offset{};
+    u32 known_partner{};
 };
 
 /// A row-major view-projection with a perspective divide: clip w is minus the view-space z

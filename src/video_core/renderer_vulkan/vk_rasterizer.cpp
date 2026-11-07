@@ -2597,76 +2597,99 @@ void RasterizerVulkan::CaptureOotCamera() {
     const u64 frame = SceneFrame().load(std::memory_order_relaxed);
     std::scoped_lock lock{camera.mutex};
     if (camera.frame != frame) {
+        // Last frame's view-projection is this frame's previous one.
+        camera.has_last = camera.found && camera.frame + 1 == frame;
+        camera.last_view_projection = camera.view_projection;
         camera.frame = frame;
         camera.valid = false;
+        camera.found = false;
         camera.moving = false;
         camera.searched = 0;
     }
-    if (camera.moving) {
+    if (camera.found) {
         return;
     }
-    static std::pair<u32, u32> logged_offsets{~0u, ~0u};
-    // Takes `current` and `previous` (in c[index] at those offsets) as the camera when they are
-    // close and invertible. True when they differ (the search for this frame is over).
-    const auto take = [&](u32 index, u32 current_offset, u32 previous_offset, const float* current,
-                          const float* previous) {
+    // Camera motion is this frame's view-projection against last frame's, as captured here. The
+    // game's own "previous" matrices don't follow the frames drawn: on a pan their motion matched
+    // the static scenery's object motion in direction only once the pair was swapped, and not in
+    // length. Which of a pair is this frame's also depends on the shader.
+    const auto distance = [](const float* a, const float* b) {
         float difference = 0.0f, magnitude = 0.0f;
         for (int i = 0; i < 16; ++i) {
-            difference += std::abs(current[i] - previous[i]);
-            magnitude += std::abs(current[i]);
+            difference += std::abs(a[i] - b[i]);
+            magnitude += std::abs(a[i]);
         }
-        if (difference > 0.3f * magnitude || (camera.valid && difference == 0.0f)) {
-            return false;
+        return std::pair{difference, magnitude};
+    };
+    static std::pair<u32, u32> logged{~0u, ~0u};
+    // Of the camera's pair (`low` before `high` in the buffer), whether `high` is this frame's:
+    // it is (seen: c[7] +0x100), unless it is clearly the one last frame's capture is close to.
+    // The older matrix need not be last frame's, so "further from last frame's" alone can't
+    // tell them apart.
+    const auto high_is_current = [&](const float* low, const float* high) {
+        if (!camera.has_last) {
+            return true;
+        }
+        const float to_low = distance(low, camera.last_view_projection.data()).first;
+        const float to_high = distance(high, camera.last_view_projection.data()).first;
+        return !(to_high < 0.5f * to_low);
+    };
+    const auto take = [&](u32 index, u32 offset, u32 partner, const float* current) {
+        if (camera.has_last) {
+            // Another camera (a different view drawn into the scene depth) is not this one.
+            const auto [difference, magnitude] =
+                distance(current, camera.last_view_projection.data());
+            if (difference > 0.3f * magnitude) {
+                return false;
+            }
         }
         std::array<float, 16> view_projection{};
-        std::array<float, 16> previous_view_projection{};
         std::copy_n(current, 16, view_projection.begin());
-        std::copy_n(previous, 16, previous_view_projection.begin());
         const auto inverse = Inverse(view_projection);
         if (!inverse) {
             return false;
         }
-        const auto reproject = Multiply(previous_view_projection, *inverse);
+        const auto& previous = camera.has_last ? camera.last_view_projection : view_projection;
+        const auto reproject = Multiply(previous, *inverse);
         if (!std::ranges::all_of(reproject, [](float v) { return std::isfinite(v); })) {
             return false;
         }
         camera.reproject = reproject;
         camera.view_projection = view_projection;
         camera.valid = true;
-        camera.moving = difference > 0.0f;
-        if (camera.moving) {
-            camera.known_index = index;
-            camera.known_current = current_offset;
-            camera.known_previous = previous_offset;
-        }
-        const std::pair offsets{index << 16 | current_offset, previous_offset};
+        camera.found = true;
+        camera.moving = previous != view_projection;
+        camera.known_index = index;
+        camera.known_offset = offset;
+        camera.known_partner = partner;
         static u32 changes{};
-        if (offsets != logged_offsets && changes < 32) {
-            logged_offsets = offsets;
+        if (std::pair{index, offset} != logged && changes < 32) {
+            logged = {index, offset};
             ++changes;
-            LOG_INFO(Render_Vulkan,
-                     "OoT DLSS camera: c[{}] view-projection at {:#x}, previous at {:#x} ({})",
-                     index, current_offset, previous_offset,
-                     camera.moving ? "differ" : "identical");
+            LOG_INFO(Render_Vulkan, "OoT DLSS camera: c[{}] view-projection at {:#x}", index,
+                     offset);
         }
-        return camera.moving;
+        return true;
     };
-    // Where a pair that differs was last found: checked on every scene draw, since only some
-    // shaders bind it (c[7]) and others hold this frame's matrix twice (c[3]), which on a pan
-    // would leave most frames without camera motion.
+    // Where the camera's pair was found last: checked on every scene draw, since only some
+    // shaders bind it.
     if (camera.known_index != ~0u) {
         const auto& cbuf = maxwell3d->state.shader_stages[0].const_buffers[camera.known_index];
-        const u32 end = (std::max)(camera.known_current, camera.known_previous) + 64;
-        if (cbuf.enabled && cbuf.size >= end &&
-            gpu_memory->IsFullyMappedRange(cbuf.address, end)) {
-            std::array<float, 16> current{};
-            std::array<float, 16> previous{};
-            gpu_memory->ReadBlockUnsafe(cbuf.address + camera.known_current, current.data(), 64);
-            gpu_memory->ReadBlockUnsafe(cbuf.address + camera.known_previous, previous.data(), 64);
-            if (IsPerspective(current.data()) && IsPerspective(previous.data()) &&
-                take(camera.known_index, camera.known_current, camera.known_previous,
-                     current.data(), previous.data())) {
-                return;
+        const u32 low_offset = (std::min)(camera.known_offset, camera.known_partner);
+        const u32 high_offset = (std::max)(camera.known_offset, camera.known_partner);
+        if (cbuf.enabled && cbuf.size >= high_offset + 64 &&
+            gpu_memory->IsFullyMappedRange(cbuf.address, high_offset + 64)) {
+            std::array<float, 16> low{};
+            std::array<float, 16> high{};
+            gpu_memory->ReadBlockUnsafe(cbuf.address + low_offset, low.data(), 64);
+            gpu_memory->ReadBlockUnsafe(cbuf.address + high_offset, high.data(), 64);
+            if (IsPerspective(low.data()) && IsPerspective(high.data())) {
+                const bool high_current = high_is_current(low.data(), high.data());
+                if (take(camera.known_index, high_current ? high_offset : low_offset,
+                         high_current ? low_offset : high_offset,
+                         high_current ? high.data() : low.data())) {
+                    return;
+                }
             }
         }
     }
@@ -2674,11 +2697,12 @@ void RasterizerVulkan::CaptureOotCamera() {
         return;
     }
     ++camera.searched;
-    // The scene draws' vertex constant buffers hold this frame's and last frame's
-    // view-projection; their offsets differ between shaders, so look for two perspective
-    // matrices that are close to each other (this frame's first). Some buffers hold the same
-    // matrix twice: a pair that differs wins, and later draws are searched until one does (with
-    // a still camera, an identical pair is right).
+    // The scene draws' vertex constant buffers hold pairs of close perspective matrices at
+    // offsets that differ between shaders. The camera's pair holds this frame's view-projection
+    // and an older one (c[7] +0xc0 / +0x100; this frame's is the one further from last frame's
+    // capture, else the second). Some buffers hold one matrix twice (c[3] +0xa0 / +0x270) that
+    // stays the same on a pan: it only stands in, with no camera motion, until the camera is
+    // found, and is never remembered.
     constexpr u32 MaxBytes = 0x800;
     std::array<float, MaxBytes / 4> words{};
     for (u32 slot = 0; slot < Tegra::Engines::Maxwell3D::Regs::MaxConstBuffers; ++slot) {
@@ -2697,12 +2721,31 @@ void RasterizerVulkan::CaptureOotCamera() {
         }
         for (size_t a = 0; a < candidates.size(); ++a) {
             for (size_t b = a + 1; b < candidates.size(); ++b) {
-                const float* current = words.data() + candidates[a] / 4;
-                const float* previous = words.data() + candidates[b] / 4;
                 if (candidates[b] < candidates[a] + 64) {
                     continue; // overlapping rows of one matrix
                 }
-                if (take(index, candidates[a], candidates[b], current, previous)) {
+                const float* first = words.data() + candidates[a] / 4;
+                const float* second = words.data() + candidates[b] / 4;
+                const auto [difference, magnitude] = distance(first, second);
+                if (difference > 0.3f * magnitude) {
+                    continue;
+                }
+                if (difference == 0.0f) {
+                    if (!camera.valid) {
+                        // No camera motion, until the camera is found.
+                        std::copy_n(first, 16, camera.view_projection.begin());
+                        const auto inverse = Inverse(camera.view_projection);
+                        if (inverse) {
+                            camera.reproject = Multiply(camera.view_projection, *inverse);
+                            camera.valid = true;
+                        }
+                    }
+                    continue;
+                }
+                const u32 offset =
+                    high_is_current(first, second) ? candidates[b] : candidates[a];
+                const u32 partner = offset == candidates[a] ? candidates[b] : candidates[a];
+                if (take(index, offset, partner, words.data() + offset / 4)) {
                     return;
                 }
             }
