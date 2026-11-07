@@ -46,8 +46,22 @@ public:
     /// `may_flush`: false on the async present thread (see Scheduler::Wait).
     bool AcquireNextImage(bool may_flush = true);
 
-    /// Presents the rendered image to the swapchain.
-    void Present(VkSemaphore render_semaphore);
+    /// Presents the rendered image to the swapchain. Returns its present id for
+    /// vkWaitForPresentKHR, or 0 (no present wait support, or the present failed).
+    u64 Present(VkSemaphore render_semaphore);
+
+    /// Whether presents carry ids for vkWaitForPresentKHR (the host frame pacer).
+    void SetPresentIds(bool enabled) {
+        present_ids = enabled;
+    }
+
+    VkSwapchainKHR Handle() const {
+        return *swapchain;
+    }
+
+    VkPresentModeKHR PresentMode() const {
+        return present_mode;
+    }
 
     /// Returns true when the swapchain needs to be recreated.
     bool NeedsRecreation() const {
@@ -161,6 +175,8 @@ private:
 
     u32 image_index{};
     u32 frame_index{};
+    u64 next_present_id{};
+    bool present_ids{};
 
     VkFormat image_view_format{};
     VkExtent2D extent{};

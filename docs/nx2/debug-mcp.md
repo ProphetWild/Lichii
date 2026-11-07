@@ -229,6 +229,9 @@ environment plus a relaunch plus a replay.
 All three are read only. Reads return at most 64 KiB. Addresses are hex strings (`"0x8012345000"`)
 or JSON numbers, and results give them back as hex strings.
 
+**`switch`** `{name, value?}` reads or sets a live switch and returns `previous` and `value`.
+Only `EDEN_NX2_HOST_PACE` (the host frame pacer, `vk_host_pacer.h`: 1 on, 0 measure only) is one.
+
 **`read_memory`** `{address, size, as?}` reads the application process's guest virtual memory.
 `as` is `hex` (default, one string), `u32`, `u64` (hex strings, since JSON numbers lose bits
 past 2^53) or `f32` (`"nan"`, `"inf"` and `"-inf"` for non-finite values). If any page of the

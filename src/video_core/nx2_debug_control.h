@@ -3,11 +3,14 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "common/common_types.h"
@@ -93,5 +96,31 @@ u64 SetRejected(std::span<const u64> hashes, bool rejected);
 void NoteRejectApplied(u64 generation);
 /// Server thread: waits until the rasterizer applied the generation.
 [[nodiscard]] bool WaitRejectApplied(u64 generation, std::chrono::milliseconds timeout);
+
+/// A switch read from the environment on first use (-1: not read yet) and settable live by the
+/// debug server's `switch` method, so one session can A/B it.
+[[nodiscard]] inline int SwitchValue(std::atomic<int>& value, const char* name, int fallback) {
+    int current = value.load(std::memory_order_relaxed);
+    if (current < 0) [[unlikely]] {
+        const char* const env = std::getenv(name);
+        int unset = -1;
+        value.compare_exchange_strong(unset, env != nullptr ? std::atoi(env) : fallback,
+                                      std::memory_order_relaxed);
+        current = value.load(std::memory_order_relaxed);
+    }
+    return current;
+}
+
+/// EDEN_NX2_HOST_PACE: the host frame pacer (vk_host_pacer.h). 1 = on (default), 0 = only
+/// measure how long each frame was shown.
+inline std::atomic<int> g_host_pace{-1};
+
+/// The live switch called `name`, or null.
+[[nodiscard]] inline std::atomic<int>* FindSwitch(std::string_view name) {
+    if (name == "EDEN_NX2_HOST_PACE") {
+        return &g_host_pace;
+    }
+    return nullptr;
+}
 
 } // namespace VideoCore::Nx2Debug
